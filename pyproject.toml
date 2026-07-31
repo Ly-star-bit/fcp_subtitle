@@ -1,0 +1,19 @@
+[project]
+name = "fcp-subtitle"
+version = "0.1.0"
+description = "本地离线音视频转 Final Cut Pro 可编辑 FCPXML 字幕 (SenseVoice + Silero VAD)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.1",
+    "onnxruntime>=1.27.0",
+    "sherpa-onnx>=1.13",
+    "soundfile>=0.14.0",
+]
+
+[project.scripts]
+fcp-subtitle = "fcp_subtitle:main"
+
+[build-system]
+requires = ["uv_build>=0.11.24,<0.12.0"]
+build-backend = "uv_build"

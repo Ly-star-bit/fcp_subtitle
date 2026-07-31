@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Downloaded ASR/VAD models (fetch via scripts/download_models.py)
+models/
+
+# Swift GUI build artifacts and vendored prebuilt libs
+gui/.build/
+gui/Vendor/
+gui/dist/
+
+# Generated Finder Quick Action (contains machine-specific absolute paths;
+# regenerate with automator/build_workflow.py)
+*.workflow/
+
+# Claude Code local settings
+.claude/
