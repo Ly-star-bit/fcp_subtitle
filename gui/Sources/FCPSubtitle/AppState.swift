@@ -56,6 +56,20 @@ struct ReplaceRule: Identifiable, Codable, Equatable {
     var replace: String
 }
 
+enum ProofreadPhase: Equatable {
+    case idle
+    case running(done: Int, total: Int)
+    case finished(Int)
+    case failed(String)
+}
+
+/// Outcome of the 测试连接 button. `ok` carries the model name the endpoint
+/// echoed back, which catches "wrong model name silently ignored" setups.
+enum LLMTestResult: Equatable {
+    case ok(String)
+    case failed(String)
+}
+
 @MainActor
 final class AppState: ObservableObject {
     static let shared = AppState()
@@ -64,6 +78,12 @@ final class AppState: ObservableObject {
     @Published var selectedFileID: UUID?
     @Published var dictionary: [ReplaceRule] = []
     @Published var lastExport: (url: URL, label: String)?
+
+    @Published var proofread: ProofreadPhase = .idle
+    @Published var corrections: [LLMCorrection] = []
+    @Published var acceptedCorrections: Set<UUID> = []
+    private var proofreadFileID: UUID?
+    private var proofreadTask: Task<Void, Never>?
 
     @AppStorage("fps") var fps = "25"
     @AppStorage("fontName") var fontName = "PingFang SC"
@@ -74,6 +94,12 @@ final class AppState: ObservableObject {
     @AppStorage("language") var language = "auto"
     @AppStorage("playSoundOnFinish") var playSoundOnFinish = true
     @AppStorage("autoApplyDictionary") var autoApplyDictionary = true
+
+    @AppStorage("llmBaseURL") var llmBaseURL = "https://api.openai.com/v1"
+    @AppStorage("llmAPIKey") var llmAPIKey = ""
+    @AppStorage("llmModel") var llmModel = "gpt-4o-mini"
+    @AppStorage("llmBatchSize") var llmBatchSize = 30
+    @AppStorage("llmUseProxy") var llmUseProxy = false
 
     static let languages: [(code: String, label: String)] = [
         ("auto", "自动检测"), ("zh", "中文"), ("en", "英语"),
@@ -503,6 +529,175 @@ final class AppState: ObservableObject {
     func revealLastExport() {
         guard let export = lastExport else { return }
         NSWorkspace.shared.activateFileViewerSelecting([export.url])
+    }
+
+    /// Write the selection as FCPXML and hand it to Final Cut Pro, which opens
+    /// its XML import dialog directly — saves the export/switch-app/locate-file
+    /// round trip. Always FCPXML regardless of the chosen export format.
+    func sendSelectedToFCP() {
+        guard let file = selectedFile, !file.segments.isEmpty else { return }
+        guard
+            let fcp = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: "com.apple.FinalCut")
+        else {
+            presentAlert(
+                title: "没有找到 Final Cut Pro",
+                message: "请确认已安装 Final Cut Pro,或改用「导出当前」手动导入。")
+            return
+        }
+
+        let content = SubtitleExporter.export(
+            segments: file.segments, format: .fcpxml,
+            fps: fps, font: fontName, fontSize: fontSize)
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                file.url.deletingPathExtension().lastPathComponent + ".fcpxml")
+        do {
+            try content.write(to: dest, atomically: true, encoding: .utf8)
+        } catch {
+            presentAlert(title: "无法写入临时文件", message: error.localizedDescription)
+            return
+        }
+
+        NSWorkspace.shared.open(
+            [dest], withApplicationAt: fcp, configuration: NSWorkspace.OpenConfiguration()
+        ) { [weak self] _, error in
+            Task { @MainActor in
+                if let error {
+                    self?.presentAlert(
+                        title: "无法交给 Final Cut Pro", message: error.localizedDescription)
+                } else {
+                    self?.lastExport = (dest, "已发送到 Final Cut Pro")
+                }
+            }
+        }
+    }
+
+    private func presentAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    // MARK: - LLM proofreading
+
+    var canProofread: Bool {
+        selectedFile?.status == .done && !(selectedFile?.segments.isEmpty ?? true)
+    }
+
+    /// Reuses the proxy configured on the 模型管理 page so one setting covers
+    /// both model downloads and API calls.
+    private var sharedProxy: (host: String, port: Int)? {
+        guard let raw = UserDefaults.standard.string(forKey: "proxyURL"),
+            let url = URL(string: raw),
+            let host = url.host
+        else { return nil }
+        return (host, url.port ?? 7899)
+    }
+
+    func startProofread() {
+        guard let file = selectedFile, !file.segments.isEmpty else { return }
+        proofreadTask?.cancel()
+
+        let proxy = llmUseProxy ? sharedProxy : nil
+        let config = LLMConfig(
+            baseURL: llmBaseURL,
+            apiKey: llmAPIKey,
+            model: llmModel,
+            batchSize: llmBatchSize,
+            proxyHost: proxy?.host,
+            proxyPort: proxy?.port ?? 0)
+
+        let segments = file.segments
+        proofreadFileID = file.id
+        corrections = []
+        acceptedCorrections = []
+        proofread = .running(done: 0, total: 0)
+
+        proofreadTask = Task {
+            do {
+                let found = try await LLMProofreader.proofread(segments: segments, config: config) {
+                    done, total in
+                    Task { @MainActor [weak self] in
+                        self?.proofread = .running(done: done, total: total)
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                self.corrections = found
+                self.acceptedCorrections = Set(found.map(\.id))
+                self.proofread = .finished(found.count)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.proofread = .failed(error.localizedDescription)
+            }
+            self.proofreadTask = nil
+        }
+    }
+
+    /// nil until 测试连接 has been pressed at least once.
+    @Published var llmTestResult: LLMTestResult?
+    @Published var llmTesting = false
+
+    func testLLMConnection() {
+        guard !llmTesting else { return }
+        llmTesting = true
+        llmTestResult = nil
+
+        let proxy = llmUseProxy ? sharedProxy : nil
+        let config = LLMConfig(
+            baseURL: llmBaseURL,
+            apiKey: llmAPIKey,
+            model: llmModel,
+            proxyHost: proxy?.host,
+            proxyPort: proxy?.port ?? 0)
+
+        Task {
+            do {
+                let model = try await LLMProofreader.testConnection(config: config)
+                self.llmTestResult = .ok(model)
+            } catch {
+                self.llmTestResult = .failed(error.localizedDescription)
+            }
+            self.llmTesting = false
+        }
+    }
+
+    func cancelProofread() {
+        proofreadTask?.cancel()
+        proofreadTask = nil
+        proofread = .idle
+    }
+
+    /// Apply the checked suggestions. Lines edited by hand since the check ran
+    /// are skipped rather than silently overwritten; the returned pair is
+    /// (applied, skipped).
+    @discardableResult
+    func applyAcceptedCorrections() -> (applied: Int, skipped: Int) {
+        guard let fileID = proofreadFileID,
+            let fi = files.firstIndex(where: { $0.id == fileID })
+        else { return (0, 0) }
+
+        var applied = 0
+        var skipped = 0
+        for correction in corrections where acceptedCorrections.contains(correction.id) {
+            guard let si = files[fi].segments.firstIndex(where: { $0.id == correction.id }) else {
+                skipped += 1
+                continue
+            }
+            guard files[fi].segments[si].text == correction.original else {
+                skipped += 1
+                continue
+            }
+            files[fi].segments[si].text = correction.suggested
+            applied += 1
+        }
+        if applied > 0 { saveSession() }
+        corrections.removeAll { acceptedCorrections.contains($0.id) }
+        acceptedCorrections = []
+        proofread = .finished(corrections.count)
+        return (applied, skipped)
     }
 
     // MARK: - Notification

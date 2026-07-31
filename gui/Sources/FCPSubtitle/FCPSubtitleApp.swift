@@ -33,7 +33,7 @@ struct FCPSubtitleApp: App {
                     .tag(1)
             }
             .environmentObject(router)
-            .frame(minWidth: 680, minHeight: 500)
+            .frame(minWidth: 820, minHeight: 500)
         }
     }
 }

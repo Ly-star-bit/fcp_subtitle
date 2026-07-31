@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var hoveredRowID: UUID?
     @State private var selectedSegmentID: UUID?
     @State private var showDictionary = false
+    @State private var showProofread = false
     @FocusState private var findFieldFocused: Bool
 
     private var modelsMissing: Bool { ModelStore.locateModels() == nil }
@@ -30,6 +31,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showDictionary) {
             DictionarySheet()
+        }
+        .sheet(isPresented: $showProofread) {
+            ProofreadSheet()
         }
         .background(hiddenShortcuts)
     }
@@ -422,6 +426,13 @@ struct ContentView: View {
             }
             Spacer()
             Button {
+                showProofread = true
+            } label: {
+                Label("AI 校对", systemImage: "sparkles")
+            }
+            .disabled(!state.canProofread)
+            .help("用大模型检查同音错别字,逐条确认后再应用")
+            Button {
                 showDictionary = true
             } label: {
                 Label("纠错词典 (\(state.dictionary.count))", systemImage: "character.book.closed")
@@ -516,8 +527,16 @@ struct ContentView: View {
                 .disabled(!state.files.contains { $0.status == .done })
             Button("导出当前") { state.exportSelected() }
                 .keyboardShortcut("s")
-                .buttonStyle(.borderedProminent)
                 .disabled(state.selectedFile?.status != .done)
+            Button {
+                state.sendSelectedToFCP()
+            } label: {
+                Label("发送到 FCP", systemImage: "arrow.up.forward.app")
+            }
+            .keyboardShortcut("e")
+            .buttonStyle(.borderedProminent)
+            .disabled(state.selectedFile?.status != .done)
+            .help("直接交给 Final Cut Pro 打开导入对话框,不用先存文件")
         }
         .padding(12)
     }

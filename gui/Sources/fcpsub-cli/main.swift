@@ -18,6 +18,12 @@ var fps = "25"
 var format = SubtitleFormat.fcpxml
 var maxChars = 0  // 0 = no splitting
 var language = ""
+var proofread = false
+var llmTest = false
+var llmBase = "https://api.openai.com/v1"
+var llmKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? ""
+var llmModel = "gpt-4o-mini"
+var llmBatch = 30
 
 var i = 3
 while i < args.count {
@@ -42,6 +48,24 @@ while i < args.count {
     } else if args[i] == "--lang", i + 1 < args.count {
         language = args[i + 1]
         i += 2
+    } else if args[i] == "--proofread" {
+        proofread = true
+        i += 1
+    } else if args[i] == "--llm-test" {
+        llmTest = true
+        i += 1
+    } else if args[i] == "--llm-base", i + 1 < args.count {
+        llmBase = args[i + 1]
+        i += 2
+    } else if args[i] == "--llm-key", i + 1 < args.count {
+        llmKey = args[i + 1]
+        i += 2
+    } else if args[i] == "--llm-model", i + 1 < args.count {
+        llmModel = args[i + 1]
+        i += 2
+    } else if args[i] == "--llm-batch", i + 1 < args.count {
+        llmBatch = Int(args[i + 1]) ?? 30
+        i += 2
     } else {
         outputPath = args[i]
         i += 1
@@ -58,6 +82,13 @@ var exitCode: Int32 = 0
 
 Task {
     do {
+        if llmTest {
+            let model = try await LLMProofreader.testConnection(
+                config: LLMConfig(baseURL: llmBase, apiKey: llmKey, model: llmModel))
+            print("连接正常,模型: \(model)")
+            exit(0)
+        }
+
         let clock = ContinuousClock()
         let startTime = clock.now
         var segments: [SubtitleSegment]
@@ -71,6 +102,26 @@ Task {
         if maxChars > 0 {
             segments = SegmentSplitter.split(segments, maxChars: maxChars)
         }
+        if proofread {
+            let config = LLMConfig(
+                baseURL: llmBase, apiKey: llmKey, model: llmModel, batchSize: llmBatch)
+            let corrections = try await LLMProofreader.proofread(
+                segments: segments, config: config
+            ) { done, total in
+                print("校对 \(done)/\(total) 批")
+            }
+            for correction in corrections {
+                print(
+                    String(
+                        format: "修正 [%8.3f] %@ → %@", correction.start, correction.original,
+                        correction.suggested))
+                if let index = segments.firstIndex(where: { $0.id == correction.id }) {
+                    segments[index].text = correction.suggested
+                }
+            }
+            print("校对建议 \(corrections.count) 处")
+        }
+
         let elapsed = clock.now - startTime
 
         for seg in segments {
