@@ -19,12 +19,13 @@ private final class CStringArena {
     }
 }
 
-public struct RecognizedSegment: Sendable {
-    public let start: Double
-    public let duration: Double
+/// One decode's output: the text plus its tokens, each with a start time in
+/// seconds from the beginning of the decoded audio. `timestamps` is empty when
+/// the model doesn't provide them.
+public struct Recognition: Sendable {
     public let text: String
-
-    public var end: Double { start + duration }
+    public let tokens: [String]
+    public let timestamps: [Float]
 }
 
 public final class SenseVoiceRecognizer {
@@ -57,14 +58,11 @@ public final class SenseVoiceRecognizer {
         SherpaOnnxDestroyOfflineRecognizer(recognizer)
     }
 
-    public func decode(samples: [Float], sampleRate: Int = 16000) -> String {
-        decode(samples: samples[...], sampleRate: sampleRate)
-    }
-
     /// Decodes a slice in place, so callers can hand over a range of a long
     /// recording without copying it out first.
-    public func decode(samples: ArraySlice<Float>, sampleRate: Int = 16000) -> String {
-        guard let stream = SherpaOnnxCreateOfflineStream(recognizer) else { return "" }
+    public func recognize(samples: ArraySlice<Float>, sampleRate: Int = 16000) -> Recognition {
+        let empty = Recognition(text: "", tokens: [], timestamps: [])
+        guard let stream = SherpaOnnxCreateOfflineStream(recognizer) else { return empty }
         defer { SherpaOnnxDestroyOfflineStream(stream) }
 
         samples.withUnsafeBufferPointer { buf in
@@ -72,9 +70,20 @@ public final class SenseVoiceRecognizer {
         }
         SherpaOnnxDecodeOfflineStream(recognizer, stream)
 
-        guard let result = SherpaOnnxGetOfflineStreamResult(stream) else { return "" }
+        guard let result = SherpaOnnxGetOfflineStreamResult(stream) else { return empty }
         defer { SherpaOnnxDestroyOfflineRecognizerResult(result) }
-        return result.pointee.text.map { String(cString: $0) } ?? ""
+        let r = result.pointee
+        let count = Int(r.count)
+        var tokens: [String] = []
+        var timestamps: [Float] = []
+        if count > 0, let array = r.tokens_arr {
+            tokens = (0..<count).map { array[$0].map { String(cString: $0) } ?? "" }
+            if let times = r.timestamps {
+                timestamps = Array(UnsafeBufferPointer(start: times, count: count))
+            }
+        }
+        return Recognition(
+            text: r.text.map { String(cString: $0) } ?? "", tokens: tokens, timestamps: timestamps)
     }
 }
 

@@ -3,6 +3,7 @@ import Foundation
 
 // Headless smoke-test CLI: same pipeline as the GUI, no window.
 // Usage: fcpsub-cli <audio> <models-dir> [output.fcpxml] [--fps 25] [--size 1080x1920]
+//        [--max-chars 18] [--punct keep|trim|subtitle] [--no-timing] [--hotwords words.txt]
 // Without --fps/--size a video input sets the timeline to match its footage.
 
 func fail(_ message: String) -> Never {
@@ -21,7 +22,10 @@ var outputPath = audioURL.deletingPathExtension().appendingPathExtension("fcpxml
 var fps: String?
 var size: (width: Int, height: Int)?
 var format = SubtitleFormat.fcpxml
-var maxChars = 0  // 0 = no splitting
+var maxChars = 18  // 0 = split only at sentence ends
+var punctuation = PunctuationStyle.trimEnd
+var timingRules = true
+var hotwords: [String] = []
 var language = ""
 var proofread = false
 var llmTest = false
@@ -56,6 +60,20 @@ while i < args.count {
         i += 2
     } else if args[i] == "--max-chars", i + 1 < args.count {
         maxChars = Int(args[i + 1]) ?? 0
+        i += 2
+    } else if args[i] == "--punct", i + 1 < args.count {
+        let styles: [String: PunctuationStyle] = ["keep": .keep, "trim": .trimEnd, "subtitle": .subtitle]
+        guard let style = styles[args[i + 1]] else { fail("--punct 可选: keep / trim / subtitle") }
+        punctuation = style
+        i += 2
+    } else if args[i] == "--no-timing" {
+        timingRules = false
+        i += 1
+    } else if args[i] == "--hotwords", i + 1 < args.count {
+        guard let list = try? String(contentsOfFile: args[i + 1], encoding: .utf8) else {
+            fail("无法读取热词文件: \(args[i + 1])")
+        }
+        hotwords = list.components(separatedBy: .newlines)
         i += 2
     } else if args[i] == "--lang", i + 1 < args.count {
         language = args[i + 1]
@@ -101,6 +119,11 @@ Task {
             exit(0)
         }
 
+        // Explicit flags win; otherwise follow the footage, then the defaults.
+        let source = await VideoFormat.probe(url: audioURL)
+        let timelineFps = fps ?? source.flatMap { FCPXMLBuilder.fpsLabel(matching: $0.frameRate) } ?? "25"
+        let timelineSize = size ?? source.map { ($0.width, $0.height) } ?? (1920, 1080)
+
         let clock = ContinuousClock()
         let startTime = clock.now
         var segments: [SubtitleSegment]
@@ -108,11 +131,14 @@ Task {
             segments = try SRTParser.parse(contentsOf: audioURL)
         } else {
             let samples = try await AudioDecoder.decode(url: audioURL)
-            segments = try Transcriber.transcribe(
+            let transcript = try Transcriber.transcribe(
                 samples: samples, models: models, language: language)
-        }
-        if maxChars > 0 {
-            segments = SegmentSplitter.split(segments, maxChars: maxChars)
+            let timing = timingRules
+                ? TimingRules(frameDuration: FCPXMLBuilder.frameSeconds(fps: timelineFps) ?? 0.04) : nil
+            segments = SubtitleLayout.segments(
+                from: transcript,
+                options: LayoutOptions(
+                    maxChars: maxChars, punctuation: punctuation, timing: timing, hotwords: hotwords))
         }
         if proofread {
             let config = LLMConfig(
@@ -140,10 +166,6 @@ Task {
             print(String(format: "[%8.3f -> %8.3f] %@", seg.start, seg.end, seg.text))
         }
 
-        // Explicit flags win; otherwise follow the footage, then the defaults.
-        let source = await VideoFormat.probe(url: audioURL)
-        let timelineFps = fps ?? source.flatMap { FCPXMLBuilder.fpsLabel(matching: $0.frameRate) } ?? "25"
-        let timelineSize = size ?? source.map { ($0.width, $0.height) } ?? (1920, 1080)
         if let source {
             print(String(format: "视频: %dx%d %.3ffps", source.width, source.height, source.frameRate))
         }

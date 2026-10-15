@@ -53,6 +53,11 @@ public enum FCPXMLBuilder {
         frameDurations.first { $0.label == fps }.map { ($0.num, $0.den) }
     }
 
+    /// Length of one frame in seconds, e.g. 0.04 for "25".
+    public static func frameSeconds(fps: String) -> Double? {
+        frameDuration(forFps: fps).map { Double($0.num) / Double($0.den) }
+    }
+
     /// The supported label closest to a measured rate (e.g. a video track's
     /// nominal 29.97003), or nil when none is within 1% — 15 fps screen
     /// recordings or 120 fps slow motion fall back to the manual setting.

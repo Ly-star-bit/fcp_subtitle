@@ -277,7 +277,7 @@ final class AppState: ObservableObject {
                     self.files[i].workStarted = Date()  // restart clock for transcription ETA
                 }
 
-                var result = try await Task.detached(priority: .userInitiated) {
+                let raw = try await Task.detached(priority: .userInitiated) {
                     try Transcriber.transcribe(samples: samples, models: models, language: lang) { fraction in
                         Task { @MainActor [weak self] in
                             self?.updateStatus(fileID: fileID, status: .transcribing(fraction))
@@ -286,9 +286,8 @@ final class AppState: ObservableObject {
                         flag.isSet
                     }
                 }.value
-                if split {
-                    result = SegmentSplitter.split(result, maxChars: maxChars)
-                }
+                var result = SubtitleLayout.segments(
+                    from: raw, options: LayoutOptions(maxChars: split ? maxChars : 0, punctuation: .keep))
                 result = self.applyDictionary(result)
 
                 let duration = clock.now - startTime
