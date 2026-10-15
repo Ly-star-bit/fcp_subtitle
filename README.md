@@ -44,6 +44,14 @@ cd gui
 
 > `fetch_deps.sh` 默认走代理下载，可用 `FCP_SUBTITLE_PROXY` 环境变量覆盖（设为空串则直连）。onnxruntime 用微软官方包而不是 sherpa-onnx 自带的那份：后者在 Apple Silicon 上用不到 int8 点积指令，识别慢约 2.6 倍。`package_app.sh` 可用 `FCP_SUBTITLE_DIST` 指定输出目录。
 
+### 发布新版本
+
+由 GitHub Actions（`.github/workflows/release.yml`）在 Apple Silicon 机器上构建并发布，本地不需要登录 `gh`：
+
+1. 改 `gui/scripts/package_app.sh` 里的 `VERSION`，写好 `RELEASE_NOTES_vX.Y.Z.md`（校验和的位置写 `{{SHA256}}`，发布时自动填入）
+2. 提交并推送到 main：Actions 会先构建、跑测试、打包，但不发布
+3. `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`：Actions 打包后创建 Release，只附一个 `FCPSubtitle-X.Y.Z.dmg`（GitHub 会把中文文件名改坏，所以附件用英文名）
+
 ### AI 校对错别字
 
 SenseVoice 最常见的错误是同音字（「字母」听成「字幕」）。识别完成后点工具栏的 **AI 校对**，把字幕分批发给大模型检查，返回逐条修改建议——**勾选确认后才会应用，不会自动改**。

@@ -158,7 +158,7 @@ for rp in $rpaths; do
     case "$rp" in
         */Vendor/sherpa-onnx/lib|Vendor/sherpa-onnx/lib)
             install_name_tool -delete_rpath "$rp" "$BIN" ;;
-        /Library/Developer/*)
+        /Library/Developer/*|/Applications/Xcode*)  # CommandLineTools / Xcode toolchain
             if [[ $links_swift_via_rpath -eq 0 ]]; then install_name_tool -delete_rpath "$rp" "$BIN"; fi ;;
     esac
 done
@@ -183,10 +183,11 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo "==> 生成 DMG(拖装布局 + 说明背景图)"
 if [[ ! -f "$GUI_DIR/assets/dmg_background.png" ]]; then
-    (cd "$PROJECT_DIR" && uv run --with pillow python gui/scripts/make_dmg_background.py)
+    (cd "$PROJECT_DIR" && uv run --no-project --with pillow python gui/scripts/make_dmg_background.py)
 fi
 rm -f "$DIST/$DMG_NAME.dmg"
-(cd "$PROJECT_DIR" && uv run --with dmgbuild dmgbuild \
+# --no-project: only dmgbuild is needed, not the Python CLI's dependencies.
+(cd "$PROJECT_DIR" && uv run --no-project --with dmgbuild dmgbuild \
     -s "$GUI_DIR/scripts/dmg_settings.py" \
     -D app="$APP" \
     -D background="$GUI_DIR/assets/dmg_background.png" \
