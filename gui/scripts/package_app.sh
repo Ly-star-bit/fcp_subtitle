@@ -9,8 +9,10 @@ GUI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_DIR="$(dirname "$GUI_DIR")"
 APP_NAME="FCP字幕"
 BUNDLE_ID="com.xiaohe.fcpsubtitle"
-VERSION="1.0.0"
-DIST="$GUI_DIR/dist"
+VERSION="1.1.0"
+# FCP_SUBTITLE_DIST overrides the output directory (e.g. for a trial build
+# that must not overwrite released DMGs).
+DIST="${FCP_SUBTITLE_DIST:-$GUI_DIR/dist}"
 APP="$DIST/$APP_NAME.app"
 
 # --no-models: 不打包模型,用户在应用内「模型管理」页自行下载(DMG 从 ~178MB 缩到 ~50MB)
@@ -108,17 +110,27 @@ else
     echo "==> 精简版:跳过模型打包"
 fi
 
-echo "==> 拷贝 dylib 并归一化 install name"
-cp "$GUI_DIR"/Vendor/sherpa-onnx/lib/*.dylib* "$APP/Contents/Frameworks/"
+echo "==> 拷贝 dylib(只拷实际链接到的,不再整目录拷贝)"
+BIN="$APP/Contents/MacOS/$APP_NAME"
+VENDOR_LIB="$GUI_DIR/Vendor/sherpa-onnx/lib"
+rpath_deps() {  # rpath_deps <binary> <lines to skip>: @rpath/X dependencies -> X
+    otool -L "$1" | awk -v skip="$2" 'NR>skip && $1 ~ /^@rpath\// {print substr($1, 8)}'
+}
+typeset -U wanted
+wanted=($(rpath_deps "$BIN" 1))
+for lib in $wanted; do
+    wanted+=($(rpath_deps "$VENDOR_LIB/$lib" 2))  # a dylib lists its own id first
+done
+for lib in $wanted; do
+    cp "$VENDOR_LIB/$lib" "$APP/Contents/Frameworks/"
+done
 
 for dylib in "$APP/Contents/Frameworks"/*.dylib; do
-    [[ -L "$dylib" ]] && continue
     base="$(basename "$dylib")"
     install_name_tool -id "@rpath/$base" "$dylib" 2>/dev/null || true
 done
 
 # Point the executable's load commands at @rpath if any resolve to plain names.
-BIN="$APP/Contents/MacOS/$APP_NAME"
 otool -L "$BIN" | awk 'NR>1 {print $1}' | while read -r dep; do
     case "$dep" in
         /usr/lib/*|/System/*|@rpath/*) ;;
@@ -128,9 +140,35 @@ otool -L "$BIN" | awk 'NR>1 {print $1}' | while read -r dep; do
     esac
 done
 
+echo "==> 去掉指向开发机的 rpath"
+# Dev builds look up dylibs in Vendor/; the shipped app must only use its own
+# Frameworks folder. The toolchain's swift lib dir is only needed by binaries
+# that link swift libs via @rpath, which this one doesn't.
+links_swift_via_rpath=0
+if otool -L "$BIN" | grep -q "@rpath/libswift"; then links_swift_via_rpath=1; fi
+rpaths=($(otool -l "$BIN" | awk '$1 == "path" {print $2}'))
+for rp in $rpaths; do
+    case "$rp" in
+        */Vendor/sherpa-onnx/lib|Vendor/sherpa-onnx/lib)
+            install_name_tool -delete_rpath "$rp" "$BIN" ;;
+        /Library/Developer/*)
+            if [[ $links_swift_via_rpath -eq 0 ]]; then install_name_tool -delete_rpath "$rp" "$BIN"; fi ;;
+    esac
+done
+otool -l "$BIN" | awk '$1 == "path" {print "    rpath: " $2}'
+
+echo "==> 检查 @rpath 依赖都在包内"
+for f in "$BIN" "$APP/Contents/Frameworks"/*.dylib; do
+    for dep in $(rpath_deps "$f" 1); do
+        if [[ ! -f "$APP/Contents/Frameworks/$dep" ]]; then
+            echo "错误: $f 依赖的 $dep 不在 Frameworks 里" >&2
+            exit 1
+        fi
+    done
+done
+
 echo "==> inside-out ad-hoc 签名"
 for dylib in "$APP/Contents/Frameworks"/*.dylib; do
-    [[ -L "$dylib" ]] && continue
     codesign --force -s - "$dylib"
 done
 codesign --force -s - "$APP"
