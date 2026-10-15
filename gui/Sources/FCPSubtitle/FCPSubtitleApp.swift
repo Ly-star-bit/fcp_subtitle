@@ -42,5 +42,9 @@ struct FCPSubtitleApp: App {
             .environmentObject(router)
             .frame(minWidth: 820, minHeight: 500)
         }
+
+        Settings {
+            SettingsView()
+        }
     }
 }

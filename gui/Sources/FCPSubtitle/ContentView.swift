@@ -7,6 +7,7 @@ struct ContentView: View {
     @StateObject private var previewPlayer = PreviewPlayer()
     @EnvironmentObject private var router: TabRouter
     @Environment(\.undoManager) private var undoManager
+    @ObservedObject private var models = ModelStore.shared
     @State private var dropTargeted = false
     @State private var findText = ""
     @State private var replaceText = ""
@@ -117,13 +118,11 @@ struct ContentView: View {
                 .keyboardShortcut("o")
 
             if modelsMissing {
-                VStack(spacing: 8) {
-                    Label("尚未安装识别模型(SRT 转换不受影响)", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                    Button("去下载模型") { router.selection = 1 }
-                        .buttonStyle(.borderedProminent)
-                }
-                .padding(.top, 12)
+                ModelSetupCard()
+                    .padding(.top, 12)
+                Text("导入 SRT 转换格式不需要模型。")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -203,6 +202,8 @@ struct ContentView: View {
         switch status {
         case .pending:
             Image(systemName: "clock").foregroundStyle(.secondary)
+        case .waitingForModels:
+            Image(systemName: "arrow.down.circle").foregroundStyle(.orange)
         case .decoding, .transcribing:
             ProgressView().controlSize(.small)
         case .done:
@@ -218,6 +219,14 @@ struct ContentView: View {
             switch file.status {
             case .pending:
                 centerMessage("排队中…", icon: "clock")
+            case .waitingForModels:
+                VStack(spacing: 14) {
+                    ModelSetupCard()
+                    Text("模型下载完成后会自动开始识别排队的文件。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .decoding(let fraction):
                 workingView(stage: "解码音频", fraction: fraction, file: file, showETA: false)
             case .transcribing(let fraction):
@@ -287,10 +296,12 @@ struct ContentView: View {
         VStack(spacing: 0) {
             findReplaceBar
             timelineStrip(file)
+            let rowIndex = Dictionary(
+                file.segments.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
             ScrollViewReader { proxy in
                 List(selection: $selectedSegmentID) {
                     ForEach(segmentBindings(fileID: file.id)) { $seg in
-                        let index = file.segments.firstIndex { $0.id == seg.id } ?? 0
+                        let index = rowIndex[seg.id] ?? 0
                         segmentRow(index: index, seg: $seg, file: file)
                             .id(seg.id)
                             .tag(seg.id)
@@ -314,6 +325,11 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                 Spacer()
+                if file.raw != nil {
+                    Button("重新断句") { state.relayout(fileID: file.id, undoManager: undoManager) }
+                        .controlSize(.small)
+                        .help("按「字幕设置」里的每行字数、标点、热词和时长规则重新生成这个文件的字幕，不用重新识别。会覆盖手动修改，可用 ⌘Z 撤销")
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 4)
@@ -355,6 +371,14 @@ struct ContentView: View {
 
             TextField("字幕", text: seg.text, axis: .vertical)
                 .textFieldStyle(.plain)
+
+            let issues = state.lineIssues(seg.wrappedValue)
+            if !issues.isEmpty {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+                    .help(issues.joined(separator: "\n"))
+            }
         }
         .padding(.vertical, 3)
         .padding(.horizontal, 4)
@@ -501,11 +525,10 @@ struct ContentView: View {
 
             timelineMenu
 
-            Toggle("断句", isOn: $state.splitLongLines)
-                .help("超过字数上限的长句按标点自动拆分")
-            if state.splitLongLines {
-                Stepper("≤\(state.maxLineChars)字", value: $state.maxLineChars, in: 8...40)
+            SettingsLink {
+                Label("字幕设置", systemImage: "slider.horizontal.3")
             }
+            .help("每行字数、标点、热词、显示时长和字体 (⌘,)")
 
             Spacer()
 

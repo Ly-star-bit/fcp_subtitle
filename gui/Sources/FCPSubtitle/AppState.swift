@@ -25,6 +25,9 @@ final class CancelFlag: @unchecked Sendable {
 struct QueueFile: Identifiable, Equatable {
     enum Status: Equatable {
         case pending
+        /// Queued while the recognition model isn't installed yet; starts
+        /// by itself once the download finishes.
+        case waitingForModels
         case decoding(Double)
         case transcribing(Double)
         case done
@@ -40,6 +43,10 @@ struct QueueFile: Identifiable, Equatable {
     var workStarted: Date?
     /// Size and rate of the file's video track; nil for audio and SRT files.
     var videoFormat: VideoFormat?
+    /// Recognized tokens, kept so 重新断句 can re-split without re-recognizing.
+    var raw: RawTranscript?
+    /// Name of the file `raw` is stored in under `AppState.transcriptsDir`.
+    var rawFile: String?
 
     var name: String { url.lastPathComponent }
     var isSubtitleImport: Bool { url.pathExtension.lowercased() == "srt" }
@@ -103,8 +110,11 @@ final class AppState: ObservableObject {
     @AppStorage("matchSourceFormat") var matchSourceFormat = true
     @AppStorage("fontName") var fontName = "PingFang SC"
     @AppStorage("fontSize") var fontSize = 60
-    @AppStorage("splitLongLines") var splitLongLines = true
     @AppStorage("maxLineChars") var maxLineChars = 18
+    @AppStorage("punctuationStyle") var punctuationStyle = PunctuationStyle.trimEnd.rawValue
+    @AppStorage("optimizeTiming") var optimizeTiming = true
+    /// One proper noun per line; see HotwordCorrector.
+    @AppStorage("hotwords") var hotwordsText = ""
     @AppStorage("exportFormat") var exportFormat = "fcpxml"
     @AppStorage("language") var language = "auto"
     @AppStorage("playSoundOnFinish") var playSoundOnFinish = true
@@ -137,6 +147,12 @@ final class AppState: ObservableObject {
     private static let dictionaryURL = ModelStore.downloadDir
         .deletingLastPathComponent()
         .appendingPathComponent("dictionary.json")
+    /// One file per recognized file's tokens, written once when recognition
+    /// finishes. Kept out of session.json, which is rewritten after every edit:
+    /// with the tokens of five hour-long files it grew to 4.4 MB and 62 ms per save.
+    private static let transcriptsDir = ModelStore.downloadDir
+        .deletingLastPathComponent()
+        .appendingPathComponent("transcripts")
 
     init() {
         restoreSession()
@@ -208,6 +224,7 @@ final class AppState: ObservableObject {
     func removeFile(id: UUID) {
         guard let index = files.firstIndex(where: { $0.id == id }) else { return }
         if files[index].isBusy { cancelCurrent() }
+        deleteTranscript(files[index].rawFile)
         files.remove(at: index)
         if selectedFileID == id { selectedFileID = files.first?.id }
         saveSession()
@@ -215,6 +232,7 @@ final class AppState: ObservableObject {
 
     func clearAll() {
         cancelCurrent()
+        files.forEach { deleteTranscript($0.rawFile) }
         files.removeAll()
         selectedFileID = nil
         saveSession()
@@ -241,7 +259,10 @@ final class AppState: ObservableObject {
 
     private func process(at index: Int) {
         guard let models = ModelStore.locateModels() else {
-            files[index].status = .failed("找不到模型文件,请先到「模型管理」页下载")
+            // Park the whole queue; modelsDidChange() restarts it after the download.
+            for i in files.indices where files[i].status == .pending {
+                files[i].status = .waitingForModels
+            }
             return
         }
 
@@ -254,8 +275,6 @@ final class AppState: ObservableObject {
         beginActivity()
 
         let lang = language
-        let split = splitLongLines
-        let maxChars = maxLineChars
 
         processTask = Task {
             let clock = ContinuousClock()
@@ -286,14 +305,11 @@ final class AppState: ObservableObject {
                         flag.isSet
                     }
                 }.value
-                var result = SubtitleLayout.segments(
-                    from: raw, options: LayoutOptions(maxChars: split ? maxChars : 0, punctuation: .keep))
-                result = self.applyDictionary(result)
 
                 let duration = clock.now - startTime
                 let elapsed = Double(duration.components.seconds)
                     + Double(duration.components.attoseconds) / 1e18
-                self.finish(fileID: fileID, segments: result, elapsed: elapsed)
+                self.finish(fileID: fileID, raw: raw, elapsed: elapsed)
             } catch is CancellationError {
                 self.updateStatus(fileID: fileID, status: .failed("已取消"))
             } catch {
@@ -311,8 +327,11 @@ final class AppState: ObservableObject {
         updateDockProgress()
     }
 
-    private func finish(fileID: UUID, segments: [SubtitleSegment], elapsed: Double) {
+    private func finish(fileID: UUID, raw: RawTranscript, elapsed: Double) {
         guard let index = files.firstIndex(where: { $0.id == fileID }) else { return }
+        files[index].raw = raw
+        files[index].rawFile = saveTranscript(raw)
+        let segments = layout(raw, for: files[index])
         files[index].segments = segments
         files[index].elapsed = elapsed
         files[index].status = .done
@@ -324,6 +343,61 @@ final class AppState: ObservableObject {
         updateDockProgress()
         guard files.contains(where: { $0.status == .done }), playSoundOnFinish else { return }
         NSSound(named: "Glass")?.play()
+    }
+
+    /// Called when a model download finishes: files parked for the model start.
+    func modelsDidChange() {
+        guard ModelStore.locateModels() != nil else { return }
+        for i in files.indices where files[i].status == .waitingForModels {
+            files[i].status = .pending
+        }
+        startNextIfIdle()
+    }
+
+    // MARK: - Layout (line breaking, punctuation, timing, hotwords)
+
+    var hotwords: [String] {
+        hotwordsText.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    func layoutOptions(for file: QueueFile) -> LayoutOptions {
+        let frame = FCPXMLBuilder.frameSeconds(fps: timelineFormat(for: file).fps) ?? 0.04
+        return LayoutOptions(
+            maxChars: maxLineChars,
+            punctuation: PunctuationStyle(rawValue: punctuationStyle) ?? .trimEnd,
+            timing: optimizeTiming ? TimingRules(frameDuration: frame) : nil,
+            hotwords: hotwords)
+    }
+
+    private func layout(_ raw: RawTranscript, for file: QueueFile) -> [SubtitleSegment] {
+        applyDictionary(SubtitleLayout.segments(from: raw, options: layoutOptions(for: file)))
+    }
+
+    /// Re-splits a recognized file with the current settings (line length,
+    /// punctuation, timing, hotwords) without recognizing it again. Replaces
+    /// hand edits, so it's undoable.
+    func relayout(fileID: UUID, undoManager: UndoManager?) {
+        guard let fi = files.firstIndex(where: { $0.id == fileID }), let raw = files[fi].raw else { return }
+        let previous = files[fi].segments
+        files[fi].segments = layout(raw, for: files[fi])
+        commitEdit(fileID: fileID, previous: previous, actionName: "重新断句", undoManager: undoManager)
+    }
+
+    /// Reasons a line may be hard to read, for the warning badge in the list.
+    func lineIssues(_ segment: SubtitleSegment) -> [String] {
+        var issues: [String] = []
+        let width = SubtitleLayout.width(segment.text)
+        if width > Double(maxLineChars) {
+            issues.append("超过每行 \(maxLineChars) 字的上限")
+        }
+        if segment.duration < 0.8 {
+            issues.append(String(format: "只显示 %.1f 秒，可能来不及看", segment.duration))
+        } else if width / segment.duration > 12 {
+            issues.append(String(format: "每秒 %.0f 个字，读起来偏快", width / segment.duration))
+        }
+        return issues
     }
 
     // MARK: - App Nap / Dock
@@ -516,6 +590,7 @@ final class AppState: ObservableObject {
         let segments: [SubtitleSegment]
         let elapsed: Double
         let videoFormat: VideoFormat?
+        let rawFile: String?
     }
 
     /// Text typed into the list arrives one keystroke at a time; coalesce it
@@ -537,7 +612,7 @@ final class AppState: ObservableObject {
             .map {
                 SessionFile(
                     path: $0.url.path, segments: $0.segments, elapsed: $0.elapsed,
-                    videoFormat: $0.videoFormat)
+                    videoFormat: $0.videoFormat, rawFile: $0.rawFile)
             }
         try? FileManager.default.createDirectory(
             at: Self.sessionURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -555,10 +630,36 @@ final class AppState: ObservableObject {
             file.segments = item.segments
             file.elapsed = item.elapsed
             file.videoFormat = item.videoFormat
+            if let name = item.rawFile, let data = try? Data(contentsOf: Self.transcriptsDir.appendingPathComponent(name)) {
+                file.raw = try? JSONDecoder().decode(RawTranscript.self, from: data)
+                file.rawFile = file.raw == nil ? nil : name
+            }
             file.status = .done
             files.append(file)
         }
         selectedFileID = files.first?.id
+
+        // Drop token files whose source file left the session.
+        let kept = Set(files.compactMap(\.rawFile))
+        let stored = (try? FileManager.default.contentsOfDirectory(atPath: Self.transcriptsDir.path)) ?? []
+        for name in stored where !kept.contains(name) {
+            deleteTranscript(name)
+        }
+    }
+
+    /// Writes a file's tokens to their own file and returns its name.
+    private func saveTranscript(_ raw: RawTranscript) -> String? {
+        let name = UUID().uuidString + ".json"
+        try? FileManager.default.createDirectory(at: Self.transcriptsDir, withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(raw),
+            (try? data.write(to: Self.transcriptsDir.appendingPathComponent(name))) != nil
+        else { return nil }
+        return name
+    }
+
+    private func deleteTranscript(_ name: String?) {
+        guard let name else { return }
+        try? FileManager.default.removeItem(at: Self.transcriptsDir.appendingPathComponent(name))
     }
 
     // MARK: - Export

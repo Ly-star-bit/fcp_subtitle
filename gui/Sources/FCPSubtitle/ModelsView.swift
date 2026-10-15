@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ModelsView: View {
-    @StateObject private var store = ModelStore()
+    @ObservedObject private var store = ModelStore.shared
 
     var body: some View {
         Form {
@@ -114,5 +114,52 @@ struct ModelsView: View {
         case .failed:
             Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
         }
+    }
+}
+
+/// Shown wherever recognition is blocked on the model (empty window, files
+/// waiting in the queue): one button fetches everything missing, progress
+/// shows in place, and the download settings are one click away if it fails.
+struct ModelSetupCard: View {
+    @ObservedObject private var store = ModelStore.shared
+    @EnvironmentObject private var router: TabRouter
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Label("首次使用需要下载识别模型（约 \(store.missingSizeText)）", systemImage: "arrow.down.circle")
+                .font(.headline)
+            Text("只需下载一次，之后识别全程离线。默认走国内镜像 hf-mirror.com。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            if let progress = store.setupProgress {
+                ProgressView(value: progress)
+                    .frame(width: 280)
+                HStack(spacing: 10) {
+                    Text("下载中 \(Int(progress * 100))%  \(store.setupStatusText)")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Button("取消") { store.cancelAllDownloads() }
+                        .controlSize(.small)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    Button("下载模型") { store.downloadMissing() }
+                        .buttonStyle(.borderedProminent)
+                    Button("下载设置…") { router.selection = 1 }
+                        .help("代理、镜像等设置在「模型管理」页")
+                }
+                if let error = store.setupError {
+                    Text("下载失败：\(error)。可以在「下载设置」里换镜像或开代理后重试。")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 380)
+                }
+            }
+        }
+        .padding(20)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.05)))
     }
 }

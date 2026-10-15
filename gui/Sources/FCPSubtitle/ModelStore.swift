@@ -19,6 +19,10 @@ struct ModelItem: Identifiable {
 
 @MainActor
 final class ModelStore: ObservableObject {
+    /// One store shared by the 模型管理 page and the first-run download card,
+    /// so both show the same progress.
+    static let shared = ModelStore()
+
     enum ItemState: Equatable {
         case notInstalled
         case bundled
@@ -197,6 +201,7 @@ final class ModelStore: ObservableObject {
                 self.activeTasks[item.id] = nil
                 self.downloadInfo[item.id] = nil
                 self.states[item.id] = .downloaded
+                AppState.shared.modelsDidChange()
             } catch is CancellationError {
                 self.activeTasks[item.id] = nil
                 self.downloadInfo[item.id] = nil
@@ -211,6 +216,54 @@ final class ModelStore: ObservableObject {
 
     func cancelDownload(_ item: ModelItem) {
         activeTasks[item.id]?.cancel()
+    }
+
+    // MARK: - First-run setup (one button for everything that's missing)
+
+    /// Items that still have to be downloaded before recognition can run.
+    var missingItems: [ModelItem] {
+        Self.items.filter {
+            switch states[$0.id] ?? .notInstalled {
+            case .notInstalled, .failed: return true
+            default: return false
+            }
+        }
+    }
+
+    /// Download size of `missingItems`, e.g. "228 MB".
+    var missingSizeText: String {
+        let mb = missingItems.flatMap(\.files).compactMap { Double($0.sizeHint.split(separator: " ").first ?? "") }
+            .reduce(0, +)
+        return mb >= 1 ? String(format: "%.0f MB", mb) : String(format: "%.1f MB", mb)
+    }
+
+    /// Average progress of the downloads in flight, nil when none is running.
+    var setupProgress: Double? {
+        let fractions = Self.items.compactMap { item -> Double? in
+            if case .downloading(let f) = states[item.id] { return f }
+            return nil
+        }
+        return fractions.isEmpty ? nil : fractions.reduce(0, +) / Double(fractions.count)
+    }
+
+    var setupStatusText: String {
+        downloadInfo.values.map { [$0.speedText, $0.etaText].filter { !$0.isEmpty }.joined(separator: " · ") }
+            .filter { !$0.isEmpty }.joined(separator: "  ")
+    }
+
+    var setupError: String? {
+        for item in Self.items {
+            if case .failed(let message) = states[item.id] { return message }
+        }
+        return nil
+    }
+
+    func downloadMissing() {
+        missingItems.forEach(download)
+    }
+
+    func cancelAllDownloads() {
+        Self.items.forEach(cancelDownload)
     }
 
     func revealInFinder() {
