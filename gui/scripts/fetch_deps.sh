@@ -1,33 +1,27 @@
 #!/bin/zsh
 # Download the prebuilt sherpa-onnx C library (macOS arm64, shared) into Vendor/.
 #
-# onnxruntime comes from Microsoft's official release rather than the copy
-# bundled in the sherpa-onnx package: that copy never selects the UDOT/I8MM
-# int8 kernels on Apple Silicon, which made recognition ~2.6x slower (10-min
-# file: 18.95s -> 7.33s on M4 Max, identical output). Both archives are pinned
-# by SHA-256 (the digests GitHub publishes for these release assets).
+# Uses the no-TTS build (the app only does ASR + VAD) with the onnxruntime it
+# bundles. sherpa-onnx 1.13.8 ships onnxruntime 1.28.2, which picks the fast
+# int8 dot-product kernels on Apple Silicon. Avoid onnxruntime 1.27.x: it makes
+# zipformer-family models output nothing (SenseVoice was unaffected).
+# The archive is pinned by the SHA-256 GitHub publishes for it.
 set -euo pipefail
 
-SHERPA_VERSION="1.13.4"
-SHERPA_NAME="sherpa-onnx-v${SHERPA_VERSION}-osx-arm64-shared"
+SHERPA_VERSION="1.13.8"
+SHERPA_NAME="sherpa-onnx-v${SHERPA_VERSION}-osx-arm64-shared-no-tts"
 SHERPA_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_VERSION}/${SHERPA_NAME}.tar.bz2"
-SHERPA_SHA256="809ab5d0c77bd8f358364a244e6ab17f2afecf9779eb9fd436fa469c3ff5375c"
-
-# Must match the libonnxruntime.<version>.dylib that libsherpa-onnx-c-api links.
-ORT_VERSION="1.27.0"
-ORT_NAME="onnxruntime-osx-arm64-${ORT_VERSION}"
-ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_NAME}.tgz"
-ORT_SHA256="545e81c58152353acb0d1e8bd6ce4b62f830c0961f5b3acfedc790ffd76e477a"
+SHERPA_SHA256="91b96512c4fa1960f8a9ed5360a6c8dda53a4b5015d0590244f14086a234557a"
 
 GUI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$GUI_DIR/Vendor/sherpa-onnx"
-STAMP="sherpa-onnx $SHERPA_VERSION + onnxruntime $ORT_VERSION (microsoft)"
+STAMP="sherpa-onnx $SHERPA_VERSION (no-tts, bundled onnxruntime)"
 
 if [[ -f "$VENDOR/VERSION" && "$(cat "$VENDOR/VERSION")" == "$STAMP" ]]; then
     echo "依赖已是最新($STAMP),跳过下载"
     exit 0
 fi
-# Older checkouts carry the slower onnxruntime and no stamp: replace wholesale.
+# Older checkouts carry other versions and no matching stamp: replace wholesale.
 rm -rf "$VENDOR"
 mkdir -p "$VENDOR/lib"
 tmp="$(mktemp -d)"
@@ -38,40 +32,33 @@ PROXY="${FCP_SUBTITLE_PROXY-http://192.168.20.87:7899}"
 curl_args=(-fL --retry 3)
 [[ -n "$PROXY" ]] && curl_args+=(-x "$PROXY")
 
-fetch() {  # fetch <url> <sha256> <dest>
-    echo "下载: $1 (代理: ${PROXY:-直连})"
-    curl "${curl_args[@]}" -o "$3" "$1"
-    echo "$2  $3" | shasum -a 256 -c -
-}
-
-fetch "$SHERPA_URL" "$SHERPA_SHA256" "$tmp/sherpa.tar.bz2"
-fetch "$ORT_URL" "$ORT_SHA256" "$tmp/ort.tgz"
+echo "下载: $SHERPA_URL (代理: ${PROXY:-直连})"
+curl "${curl_args[@]}" -o "$tmp/sherpa.tar.bz2" "$SHERPA_URL"
+echo "$SHERPA_SHA256  $tmp/sherpa.tar.bz2" | shasum -a 256 -c -
 tar xjf "$tmp/sherpa.tar.bz2" -C "$tmp"
-tar xzf "$tmp/ort.tgz" -C "$tmp"
 
 cp -R "$tmp/$SHERPA_NAME/include" "$VENDOR/"
-# Only the C API is used; the C++ wrapper and the bundled onnxruntime are not.
-cp "$tmp/$SHERPA_NAME/lib/libsherpa-onnx-c-api.dylib" "$VENDOR/lib/"
-cp "$tmp/$ORT_NAME/lib/libonnxruntime.$ORT_VERSION.dylib" "$VENDOR/lib/"
+# Only the C API and its onnxruntime are used; the C++ wrapper is not.
+cp "$tmp/$SHERPA_NAME/lib/libsherpa-onnx-c-api.dylib" "$tmp/$SHERPA_NAME/lib/libonnxruntime.dylib" "$VENDOR/lib/"
 
-ORT_LIB="libonnxruntime.$ORT_VERSION.dylib"
-if ! otool -L "$VENDOR/lib/libsherpa-onnx-c-api.dylib" | grep -q "@rpath/$ORT_LIB"; then
-    echo "错误: libsherpa-onnx-c-api 依赖的 onnxruntime 版本不是 $ORT_VERSION:" >&2
-    otool -L "$VENDOR/lib/libsherpa-onnx-c-api.dylib" | grep onnxruntime >&2
+ort_version=$(strings -a "$VENDOR/lib/libonnxruntime.dylib" | grep -m1 -E '^1\.[0-9]+\.[0-9]+$' || true)
+echo "onnxruntime: ${ort_version:-未知版本}"
+if [[ "$ort_version" == 1.27.* ]]; then
+    echo "错误: onnxruntime 1.27.x 会让 zipformer 类模型输出为空,请换用其他版本" >&2
     exit 1
 fi
-# Microsoft ships install name @rpath/libonnxruntime.1.dylib; rename it to what
-# sherpa-onnx links against so the app and sherpa-onnx resolve one file.
-install_name_tool -id "@rpath/$ORT_LIB" "$VENDOR/lib/$ORT_LIB"
-# The linker's -lonnxruntime needs this name; a symlink keeps one real copy.
-ln -sf "$ORT_LIB" "$VENDOR/lib/libonnxruntime.dylib"
 
-echo "--- 重签(install_name_tool 会破坏原签名) ---"
+echo "--- 重签 ---"
 for dylib in "$VENDOR"/lib/*.dylib; do
-    [[ -L "$dylib" ]] && continue
     codesign --force -s - "$dylib"
     codesign --verify "$dylib"
 done
 
 echo "$STAMP" > "$VENDOR/VERSION"
+# SwiftPM doesn't track these dylibs as link inputs, so binaries built against
+# the previous version would keep pointing at it.
+if [[ -d "$GUI_DIR/.build" ]]; then
+    echo "依赖已更换,清理旧的构建产物 (.build)"
+    rm -rf "$GUI_DIR/.build"
+fi
 echo "已就绪: $VENDOR ($STAMP)"
