@@ -300,9 +300,11 @@ struct ContentView: View {
                 }
             }
             HStack {
+                let timeline = state.timelineFormat(for: file)
                 Text("\(file.segments.count) 句"
                     + (file.isSubtitleImport
-                        ? " · 从 SRT 导入" : " · 识别耗时 \(String(format: "%.1f", file.elapsed))s"))
+                        ? " · 从 SRT 导入" : " · 识别耗时 \(String(format: "%.1f", file.elapsed))s")
+                    + " · 时间线 \(timeline.label)\(timeline.followsSource ? "(跟随视频)" : "")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("⌘↑/⌘↓ 选句 · ⌘↩ 试听 · 右键行可合并/拆分")
@@ -492,10 +494,7 @@ struct ContentView: View {
             .frame(width: 120)
             .help("识别语言,粤语/日语素材指定后更准")
 
-            Picker("帧率", selection: $state.fps) {
-                ForEach(FCPXMLBuilder.fpsLabels, id: \.self) { Text($0) }
-            }
-            .frame(width: 105)
+            timelineMenu
 
             Toggle("断句", isOn: $state.splitLongLines)
                 .help("超过字数上限的长句按标点自动拆分")
@@ -539,6 +538,25 @@ struct ContentView: View {
             .help("直接交给 Final Cut Pro 打开导入对话框,不用先存文件")
         }
         .padding(12)
+    }
+
+    /// FCPXML timeline settings: follow each video's own size and rate, or
+    /// the manual rate/size (always used for audio and SRT files).
+    private var timelineMenu: some View {
+        Menu {
+            Toggle("跟随视频素材的尺寸和帧率", isOn: $state.matchSourceFormat)
+            Divider()
+            Picker("帧率", selection: $state.fps) {
+                ForEach(FCPXMLBuilder.fpsLabels, id: \.self) { Text("\($0) fps").tag($0) }
+            }
+            Picker("画面尺寸", selection: $state.timelineSize) {
+                ForEach(AppState.timelineSizes, id: \.id) { Text($0.label).tag($0.id) }
+            }
+        } label: {
+            Text(state.matchSourceFormat ? "时间线: 跟随素材" : "时间线: \(state.fps)p")
+        }
+        .fixedSize()
+        .help("导出 FCPXML 的画面尺寸和帧率。跟随素材时视频按自身格式导出,音频/SRT 用手动设置")
     }
 
     private func timeLabel(_ seconds: Double) -> String {

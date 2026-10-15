@@ -38,6 +38,8 @@ struct QueueFile: Identifiable, Equatable {
     var peaks: [Float] = []
     var elapsed: Double = 0
     var workStarted: Date?
+    /// Size and rate of the file's video track; nil for audio and SRT files.
+    var videoFormat: VideoFormat?
 
     var name: String { url.lastPathComponent }
     var isSubtitleImport: Bool { url.pathExtension.lowercased() == "srt" }
@@ -70,6 +72,17 @@ enum LLMTestResult: Equatable {
     case failed(String)
 }
 
+/// The FCPXML timeline a file exports to.
+struct TimelineFormat: Equatable {
+    var fps: String
+    var width: Int
+    var height: Int
+    /// True when size (and, if it's a supported rate, fps) came from the video.
+    var followsSource: Bool
+
+    var label: String { "\(width)×\(height) · \(fps)p" }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     static let shared = AppState()
@@ -86,6 +99,8 @@ final class AppState: ObservableObject {
     private var proofreadTask: Task<Void, Never>?
 
     @AppStorage("fps") var fps = "25"
+    @AppStorage("timelineSize") var timelineSize = "1920x1080"
+    @AppStorage("matchSourceFormat") var matchSourceFormat = true
     @AppStorage("fontName") var fontName = "PingFang SC"
     @AppStorage("fontSize") var fontSize = 60
     @AppStorage("splitLongLines") var splitLongLines = true
@@ -104,6 +119,11 @@ final class AppState: ObservableObject {
     static let languages: [(code: String, label: String)] = [
         ("auto", "自动检测"), ("zh", "中文"), ("en", "英语"),
         ("ja", "日语"), ("ko", "韩语"), ("yue", "粤语"),
+    ]
+
+    static let timelineSizes: [(id: String, label: String)] = [
+        ("1920x1080", "1920×1080 横屏"), ("1080x1920", "1080×1920 竖屏"),
+        ("3840x2160", "3840×2160 4K 横屏"), ("2160x3840", "2160×3840 4K 竖屏"),
     ]
 
     private var processTask: Task<Void, Never>?
@@ -168,11 +188,11 @@ final class AppState: ObservableObject {
         for url in urls {
             var file = QueueFile(url: url)
             if file.isSubtitleImport {
-                if let content = try? String(contentsOf: url, encoding: .utf8) {
-                    file.segments = applyDictionary(SRTParser.parse(content))
+                do {
+                    file.segments = applyDictionary(try SRTParser.parse(contentsOf: url))
                     file.status = .done
-                } else {
-                    file.status = .failed("无法读取 SRT 文件")
+                } catch {
+                    file.status = .failed("无法读取 SRT 文件: \(error.localizedDescription)")
                 }
             }
             newFiles.append(file)
@@ -247,10 +267,12 @@ final class AppState: ObservableObject {
                 } shouldCancel: {
                     flag.isSet
                 }
+                let videoFormat = await VideoFormat.probe(url: url)
                 let peaks = AudioDecoder.waveformPeaks(samples: samples)
                 self.updateStatus(fileID: fileID, status: .transcribing(0))
                 if let i = self.files.firstIndex(where: { $0.id == fileID }) {
                     self.files[i].peaks = peaks
+                    self.files[i].videoFormat = videoFormat
                     self.files[i].workStarted = Date()  // restart clock for transcription ETA
                 }
 
@@ -457,12 +479,17 @@ final class AppState: ObservableObject {
         let path: String
         let segments: [SubtitleSegment]
         let elapsed: Double
+        let videoFormat: VideoFormat?
     }
 
     func saveSession() {
         let snapshot = files
             .filter { $0.status == .done && !$0.segments.isEmpty }
-            .map { SessionFile(path: $0.url.path, segments: $0.segments, elapsed: $0.elapsed) }
+            .map {
+                SessionFile(
+                    path: $0.url.path, segments: $0.segments, elapsed: $0.elapsed,
+                    videoFormat: $0.videoFormat)
+            }
         try? FileManager.default.createDirectory(
             at: Self.sessionURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(snapshot) {
@@ -478,6 +505,7 @@ final class AppState: ObservableObject {
             var file = QueueFile(url: URL(fileURLWithPath: item.path))
             file.segments = item.segments
             file.elapsed = item.elapsed
+            file.videoFormat = item.videoFormat
             file.status = .done
             files.append(file)
         }
@@ -486,17 +514,44 @@ final class AppState: ObservableObject {
 
     // MARK: - Export
 
-    private func subtitleContent(for file: QueueFile) -> (String, String) {
-        let format = SubtitleFormat(rawValue: exportFormat) ?? .fcpxml
-        let content = SubtitleExporter.export(
+    /// A video exports to its own size, and its own rate when that's one FCP
+    /// supports (15 fps screen recordings keep the manual rate); audio and SRT
+    /// files, or 跟随视频素材 switched off, use the manual settings.
+    func timelineFormat(for file: QueueFile) -> TimelineFormat {
+        if matchSourceFormat, let video = file.videoFormat {
+            return TimelineFormat(
+                fps: FCPXMLBuilder.fpsLabel(matching: video.frameRate) ?? fps,
+                width: video.width, height: video.height, followsSource: true)
+        }
+        let size = timelineSize.split(separator: "x").compactMap { Int($0) }
+        return TimelineFormat(
+            fps: fps,
+            width: size.count == 2 ? size[0] : 1920,
+            height: size.count == 2 ? size[1] : 1080,
+            followsSource: false)
+    }
+
+    private func subtitleContent(
+        for file: QueueFile, format: SubtitleFormat
+    ) throws -> String {
+        let timeline = timelineFormat(for: file)
+        return try SubtitleExporter.export(
             segments: file.segments, format: format,
-            fps: fps, font: fontName, fontSize: fontSize)
-        return (content, format.fileExtension)
+            fps: timeline.fps, width: timeline.width, height: timeline.height,
+            font: fontName, fontSize: fontSize)
     }
 
     func exportSelected() {
         guard let file = selectedFile, !file.segments.isEmpty else { return }
-        let (content, ext) = subtitleContent(for: file)
+        let format = SubtitleFormat(rawValue: exportFormat) ?? .fcpxml
+        let ext = format.fileExtension
+        let content: String
+        do {
+            content = try subtitleContent(for: file, format: format)
+        } catch {
+            presentAlert(title: "无法生成字幕", message: error.localizedDescription)
+            return
+        }
 
         let panel = NSSavePanel()
         panel.title = "导出字幕"
@@ -515,9 +570,10 @@ final class AppState: ObservableObject {
     func exportAll() {
         var count = 0
         var lastURL: URL?
+        let format = SubtitleFormat(rawValue: exportFormat) ?? .fcpxml
         for file in files where file.status == .done && !file.segments.isEmpty {
-            let (content, ext) = subtitleContent(for: file)
-            let dest = file.url.deletingPathExtension().appendingPathExtension(ext)
+            guard let content = try? subtitleContent(for: file, format: format) else { continue }
+            let dest = file.url.deletingPathExtension().appendingPathExtension(format.fileExtension)
             if (try? content.write(to: dest, atomically: true, encoding: .utf8)) != nil {
                 count += 1
                 lastURL = dest
@@ -548,13 +604,11 @@ final class AppState: ObservableObject {
             return
         }
 
-        let content = SubtitleExporter.export(
-            segments: file.segments, format: .fcpxml,
-            fps: fps, font: fontName, fontSize: fontSize)
         let dest = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 file.url.deletingPathExtension().lastPathComponent + ".fcpxml")
         do {
+            let content = try subtitleContent(for: file, format: .fcpxml)
             try content.write(to: dest, atomically: true, encoding: .utf8)
         } catch {
             presentAlert(title: "无法写入临时文件", message: error.localizedDescription)

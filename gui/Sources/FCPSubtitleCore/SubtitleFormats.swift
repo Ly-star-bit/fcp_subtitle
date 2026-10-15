@@ -25,26 +25,30 @@ public enum SubtitleFormat: String, CaseIterable, Sendable {
 }
 
 public enum SubtitleExporter {
-    /// Serialize segments to the given format. FCPXML honors fps/font settings;
-    /// ASS embeds font/size as its default style; others ignore styling.
+    /// Serialize segments to the given format. FCPXML honors fps/size/font
+    /// settings; ASS embeds size and font as its script resolution and default
+    /// style; others ignore styling. Throws only for an unsupported FCPXML fps.
     public static func export(
         segments: [SubtitleSegment],
         format: SubtitleFormat,
         fps: String = "25",
+        width: Int = 1920,
+        height: Int = 1080,
         font: String = "PingFang SC",
         fontSize: Int = 60
-    ) -> String {
+    ) throws -> String {
         let ordered = segments.sorted { $0.start < $1.start }
         switch format {
         case .fcpxml:
-            return FCPXMLBuilder.build(
-                segments: ordered, fps: fps, font: font, fontSize: fontSize)
+            return try FCPXMLBuilder.build(
+                segments: ordered, fps: fps, width: width, height: height,
+                font: font, fontSize: fontSize)
         case .srt:
             return SRTBuilder.build(segments: ordered)
         case .vtt:
             return buildVTT(ordered)
         case .ass:
-            return buildASS(ordered, font: font, fontSize: fontSize)
+            return buildASS(ordered, width: width, height: height, font: font, fontSize: fontSize)
         case .lrc:
             return buildLRC(ordered)
         case .txt:
@@ -71,12 +75,14 @@ public enum SubtitleExporter {
 
     // MARK: - ASS
 
-    private static func buildASS(_ segments: [SubtitleSegment], font: String, fontSize: Int) -> String {
+    private static func buildASS(
+        _ segments: [SubtitleSegment], width: Int, height: Int, font: String, fontSize: Int
+    ) -> String {
         var out = """
         [Script Info]
         ScriptType: v4.00+
-        PlayResX: 1920
-        PlayResY: 1080
+        PlayResX: \(width)
+        PlayResY: \(height)
         WrapStyle: 0
 
         [V4+ Styles]

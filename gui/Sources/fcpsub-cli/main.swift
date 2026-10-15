@@ -2,19 +2,24 @@ import FCPSubtitleCore
 import Foundation
 
 // Headless smoke-test CLI: same pipeline as the GUI, no window.
-// Usage: fcpsub-cli <audio> <models-dir> [output.fcpxml] [--fps 25]
+// Usage: fcpsub-cli <audio> <models-dir> [output.fcpxml] [--fps 25] [--size 1080x1920]
+// Without --fps/--size a video input sets the timeline to match its footage.
+
+func fail(_ message: String) -> Never {
+    FileHandle.standardError.write("\(message)\n".data(using: .utf8)!)
+    exit(1)
+}
 
 let args = CommandLine.arguments
 guard args.count >= 3 else {
-    FileHandle.standardError.write(
-        "用法: fcpsub-cli <音频文件> <models目录> [输出.fcpxml] [--fps 25]\n".data(using: .utf8)!)
-    exit(1)
+    fail("用法: fcpsub-cli <音频文件> <models目录> [输出.fcpxml] [--fps 25] [--size 1920x1080]")
 }
 
 let audioURL = URL(fileURLWithPath: args[1])
 let modelsDir = URL(fileURLWithPath: args[2])
 var outputPath = audioURL.deletingPathExtension().appendingPathExtension("fcpxml").path
-var fps = "25"
+var fps: String?
+var size: (width: Int, height: Int)?
 var format = SubtitleFormat.fcpxml
 var maxChars = 0  // 0 = no splitting
 var language = ""
@@ -28,17 +33,24 @@ var llmBatch = 30
 var i = 3
 while i < args.count {
     if args[i] == "--fps", i + 1 < args.count {
+        guard FCPXMLBuilder.fpsLabels.contains(args[i + 1]) else {
+            fail("不支持的帧率: \(args[i + 1]),可选: \(FCPXMLBuilder.fpsLabels.joined(separator: " / "))")
+        }
         fps = args[i + 1]
+        i += 2
+    } else if args[i] == "--size", i + 1 < args.count {
+        let parts = args[i + 1].lowercased().split(separator: "x").compactMap { Int($0) }
+        guard parts.count == 2, parts[0] > 0, parts[1] > 0 else {
+            fail("画面尺寸格式应为 宽x高,例如 1080x1920")
+        }
+        size = (parts[0], parts[1])
         i += 2
     } else if args[i] == "--srt" {
         format = .srt
         i += 1
     } else if args[i] == "--format", i + 1 < args.count {
         guard let f = SubtitleFormat(rawValue: args[i + 1]) else {
-            FileHandle.standardError.write(
-                "不支持的格式: \(args[i + 1]),可选: \(SubtitleFormat.allCases.map(\.rawValue).joined(separator: "/"))\n"
-                    .data(using: .utf8)!)
-            exit(1)
+            fail("不支持的格式: \(args[i + 1]),可选: \(SubtitleFormat.allCases.map(\.rawValue).joined(separator: "/"))")
         }
         format = f
         i += 2
@@ -93,7 +105,7 @@ Task {
         let startTime = clock.now
         var segments: [SubtitleSegment]
         if audioURL.pathExtension.lowercased() == "srt" {
-            segments = SRTParser.parse(try String(contentsOf: audioURL, encoding: .utf8))
+            segments = try SRTParser.parse(contentsOf: audioURL)
         } else {
             let samples = try await AudioDecoder.decode(url: audioURL)
             segments = try Transcriber.transcribe(
@@ -128,7 +140,18 @@ Task {
             print(String(format: "[%8.3f -> %8.3f] %@", seg.start, seg.end, seg.text))
         }
 
-        let content = SubtitleExporter.export(segments: segments, format: format, fps: fps)
+        // Explicit flags win; otherwise follow the footage, then the defaults.
+        let source = await VideoFormat.probe(url: audioURL)
+        let timelineFps = fps ?? source.flatMap { FCPXMLBuilder.fpsLabel(matching: $0.frameRate) } ?? "25"
+        let timelineSize = size ?? source.map { ($0.width, $0.height) } ?? (1920, 1080)
+        if let source {
+            print(String(format: "视频: %dx%d %.3ffps", source.width, source.height, source.frameRate))
+        }
+        print("时间线: \(timelineSize.width)x\(timelineSize.height) \(timelineFps)fps")
+
+        let content = try SubtitleExporter.export(
+            segments: segments, format: format, fps: timelineFps,
+            width: timelineSize.width, height: timelineSize.height)
         if format != .fcpxml, outputPath.hasSuffix(".fcpxml") {
             outputPath = String(outputPath.dropLast(7)) + "." + format.fileExtension
         }

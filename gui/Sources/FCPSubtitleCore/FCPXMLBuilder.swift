@@ -20,22 +20,66 @@ public struct SubtitleSegment: Identifiable, Equatable, Sendable, Codable {
 /// (src/fcp_subtitle/fcpxml.py): rational frame times, explicit gap filling,
 /// XML entity escaping, one editable Basic Title per subtitle line.
 public enum FCPXMLBuilder {
+    public enum BuildError: LocalizedError {
+        case unsupportedFrameRate(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .unsupportedFrameRate(let fps):
+                return "不支持的帧率 \(fps),可选: \(FCPXMLBuilder.fpsLabels.joined(separator: " / "))"
+            }
+        }
+    }
+
     public static let basicTitleUID =
         ".../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti"
 
-    /// fps label -> frame duration (numerator, denominator)
-    public static let frameDurations: [(label: String, num: Int, den: Int)] = [
-        ("23.976", 1001, 24000),
-        ("24", 1, 24),
-        ("25", 1, 25),
-        ("29.97", 1001, 30000),
-        ("30", 1, 30),
+    /// fps label -> frame duration (numerator, denominator), plus the rate
+    /// token FCP uses in its standard format names (23.976 is "2398").
+    public static let frameDurations: [(label: String, num: Int, den: Int, nameToken: String)] = [
+        ("23.976", 1001, 24000, "2398"),
+        ("24", 1, 24, "24"),
+        ("25", 1, 25, "25"),
+        ("29.97", 1001, 30000, "2997"),
+        ("30", 1, 30, "30"),
+        ("50", 1, 50, "50"),
+        ("59.94", 1001, 60000, "5994"),
+        ("60", 1, 60, "60"),
     ]
 
     public static var fpsLabels: [String] { frameDurations.map(\.label) }
 
     static func frameDuration(forFps fps: String) -> (num: Int, den: Int)? {
         frameDurations.first { $0.label == fps }.map { ($0.num, $0.den) }
+    }
+
+    /// The supported label closest to a measured rate (e.g. a video track's
+    /// nominal 29.97003), or nil when none is within 1% — 15 fps screen
+    /// recordings or 120 fps slow motion fall back to the manual setting.
+    public static func fpsLabel(matching rate: Double) -> String? {
+        guard rate > 0 else { return nil }
+        let nearest = frameDurations.min {
+            abs(Double($0.den) / Double($0.num) - rate) < abs(Double($1.den) / Double($1.num) - rate)
+        }
+        guard let nearest else { return nil }
+        let exact = Double(nearest.den) / Double(nearest.num)
+        return abs(exact - rate) / exact <= 0.01 ? nearest.label : nil
+    }
+
+    /// FCP's own name for standard HD formats. Other sizes (vertical, 4K...)
+    /// leave the optional name out and are described by width/height/rate.
+    static func formatName(width: Int, height: Int, fps: String) -> String? {
+        guard let token = frameDurations.first(where: { $0.label == fps })?.nameToken else {
+            return nil
+        }
+        switch (width, height) {
+        case (1920, 1080):
+            return "FFVideoFormat1080p\(token)"
+        case (1280, 720) where ["2398", "25", "2997", "50", "5994", "60"].contains(token):
+            return "FFVideoFormat720p\(token)"
+        default:
+            return nil
+        }
     }
 
     private static func escapeXML(_ s: String) -> String {
@@ -75,9 +119,9 @@ public enum FCPXMLBuilder {
         fontColor: String = "1 1 1 1",
         eventName: String = "SenseVoice 字幕导入",
         projectName: String = "自动字幕时间线"
-    ) -> String {
+    ) throws -> String {
         guard let (num, den) = frameDuration(forFps: fps) else {
-            preconditionFailure("unsupported fps \(fps)")
+            throw BuildError.unsupportedFrameRate(fps)
         }
 
         var body = ""
@@ -117,14 +161,15 @@ public enum FCPXMLBuilder {
             cursorFrames = endFrames
         }
 
-        let formatName = "FFVideoFormat\(height)p\(fps.replacingOccurrences(of: ".", with: ""))"
+        let nameAttribute = formatName(width: width, height: height, fps: fps)
+            .map { " name=\"\($0)\"" } ?? ""
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE fcpxml>
 
         <fcpxml version="1.9">
             <resources>
-                <format id="r1" name="\(formatName)" frameDuration="\(num)/\(den)s" width="\(width)" height="\(height)" colorSpace="1-1-1 (Rec. 709)"/>
+                <format id="r1"\(nameAttribute) frameDuration="\(num)/\(den)s" width="\(width)" height="\(height)" colorSpace="1-1-1 (Rec. 709)"/>
                 <effect id="r2" name="Basic Title" uid="\(basicTitleUID)"/>
             </resources>
             <library>

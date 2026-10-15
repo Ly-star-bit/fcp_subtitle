@@ -27,7 +27,26 @@ FRAME_DURATIONS: dict[str, tuple[int, int]] = {
     "25": (1, 25),
     "29.97": (1001, 30000),
     "30": (1, 30),
+    "50": (1, 50),
+    "59.94": (1001, 60000),
+    "60": (1, 60),
 }
+
+# Rate token FCP uses in its standard format names (23.976 is "2398").
+_FORMAT_NAME_TOKENS = {
+    "23.976": "2398", "24": "24", "25": "25", "29.97": "2997",
+    "30": "30", "50": "50", "59.94": "5994", "60": "60",
+}
+
+
+def _format_name(width: int, height: int, fps: str) -> str | None:
+    """FCP's own name for standard HD formats; other sizes leave it out."""
+    token = _FORMAT_NAME_TOKENS[fps]
+    if (width, height) == (1920, 1080):
+        return f"FFVideoFormat1080p{token}"
+    if (width, height) == (1280, 720) and token in {"2398", "25", "2997", "50", "5994", "60"}:
+        return f"FFVideoFormat720p{token}"
+    return None
 
 
 def frame_duration_for_fps(fps: str) -> Fraction:
@@ -70,16 +89,16 @@ def build_fcpxml(
     fcpxml = ET.Element("fcpxml", version="1.9")
 
     resources = ET.SubElement(fcpxml, "resources")
-    ET.SubElement(
-        resources,
-        "format",
-        id="r1",
-        name=f"FFVideoFormat{height}p{fps.replace('.', '')}",
-        frameDuration=f"{frame_duration.numerator}/{frame_duration.denominator}s",
-        width=str(width),
-        height=str(height),
-        colorSpace="1-1-1 (Rec. 709)",
-    )
+    format_attrs = {"id": "r1"}
+    if name := _format_name(width, height, fps):
+        format_attrs["name"] = name
+    format_attrs |= {
+        "frameDuration": f"{frame_duration.numerator}/{frame_duration.denominator}s",
+        "width": str(width),
+        "height": str(height),
+        "colorSpace": "1-1-1 (Rec. 709)",
+    }
+    ET.SubElement(resources, "format", format_attrs)
     ET.SubElement(resources, "effect", id="r2", name="Basic Title", uid=BASIC_TITLE_UID)
 
     library = ET.SubElement(fcpxml, "library")
