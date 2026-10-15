@@ -9,7 +9,7 @@ GUI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_DIR="$(dirname "$GUI_DIR")"
 APP_NAME="FCP字幕"
 BUNDLE_ID="com.xiaohe.fcpsubtitle"
-VERSION="1.1.0"
+VERSION="1.2.0"
 # FCP_SUBTITLE_DIST overrides the output directory (e.g. for a trial build
 # that must not overwrite released DMGs).
 DIST="${FCP_SUBTITLE_DIST:-$GUI_DIR/dist}"
