@@ -58,6 +58,12 @@ public final class SenseVoiceRecognizer {
     }
 
     public func decode(samples: [Float], sampleRate: Int = 16000) -> String {
+        decode(samples: samples[...], sampleRate: sampleRate)
+    }
+
+    /// Decodes a slice in place, so callers can hand over a range of a long
+    /// recording without copying it out first.
+    public func decode(samples: ArraySlice<Float>, sampleRate: Int = 16000) -> String {
         guard let stream = SherpaOnnxCreateOfflineStream(recognizer) else { return "" }
         defer { SherpaOnnxDestroyOfflineStream(stream) }
 
@@ -111,7 +117,7 @@ public final class SileroVad {
         SherpaOnnxDestroyVoiceActivityDetector(vad)
     }
 
-    public func acceptWaveform(_ samples: [Float]) {
+    public func acceptWaveform(_ samples: ArraySlice<Float>) {
         samples.withUnsafeBufferPointer { buf in
             SherpaOnnxVoiceActivityDetectorAcceptWaveform(vad, buf.baseAddress, Int32(buf.count))
         }
@@ -125,15 +131,16 @@ public final class SileroVad {
         SherpaOnnxVoiceActivityDetectorEmpty(vad) == 1
     }
 
-    /// Pops the front finished segment, returning its start sample index and samples.
-    public func popFront() -> (start: Int, samples: [Float])? {
+    /// Pops the front finished segment as a range of sample indices into the
+    /// stream fed so far. The segment's own sample copy is not needed: callers
+    /// slice the original recording, which also lets them widen the range.
+    public func popFrontRange() -> Range<Int>? {
         guard !isEmpty, let seg = SherpaOnnxVoiceActivityDetectorFront(vad) else { return nil }
         defer {
             SherpaOnnxDestroySpeechSegment(seg)
             SherpaOnnxVoiceActivityDetectorPop(vad)
         }
-        let n = Int(seg.pointee.n)
-        let samples = [Float](UnsafeBufferPointer(start: seg.pointee.samples, count: n))
-        return (Int(seg.pointee.start), samples)
+        let start = Int(seg.pointee.start)
+        return start..<(start + Int(seg.pointee.n))
     }
 }

@@ -8,8 +8,11 @@ public enum AudioDecoder {
     public static let sampleRate = 16000
 
     /// `onProgress` receives 0...1 based on decoded presentation time vs asset duration.
+    /// `shouldCancel` is polled per decoded buffer; returning true aborts with CancellationError.
     public static func decode(
-        url: URL, onProgress: (@Sendable (Double) -> Void)? = nil
+        url: URL,
+        onProgress: (@Sendable (Double) -> Void)? = nil,
+        shouldCancel: (@Sendable () -> Bool)? = nil
     ) async throws -> [Float] {
         let asset = AVURLAsset(url: url)
         let totalSeconds = try await CMTimeGetSeconds(asset.load(.duration))
@@ -40,7 +43,12 @@ public enum AudioDecoder {
         }
 
         var samples: [Float] = []
+        var progress = ProgressThrottle(onProgress)
         while let sampleBuffer = output.copyNextSampleBuffer() {
+            if shouldCancel?() == true {
+                reader.cancelReading()
+                throw CancellationError()
+            }
             guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
             let length = CMBlockBufferGetDataLength(blockBuffer)
             let count = length / MemoryLayout<Float>.size
@@ -52,7 +60,7 @@ public enum AudioDecoder {
             }
             if totalSeconds.isFinite, totalSeconds > 0 {
                 let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                onProgress?(min(CMTimeGetSeconds(pts) / totalSeconds, 1.0))
+                progress.report(CMTimeGetSeconds(pts) / totalSeconds)
             }
         }
 

@@ -244,6 +244,8 @@ final class AppState: ObservableObject {
                     Task { @MainActor [weak self] in
                         self?.updateStatus(fileID: fileID, status: .decoding(fraction))
                     }
+                } shouldCancel: {
+                    flag.isSet
                 }
                 let peaks = AudioDecoder.waveformPeaks(samples: samples)
                 self.updateStatus(fileID: fileID, status: .transcribing(0))
