@@ -15,13 +15,16 @@ VERSION="1.1.0"
 DIST="${FCP_SUBTITLE_DIST:-$GUI_DIR/dist}"
 APP="$DIST/$APP_NAME.app"
 
-# --no-models: 不打包模型,用户在应用内「模型管理」页自行下载(DMG 从 ~178MB 缩到 ~50MB)
-WITH_MODELS=1
+# 默认产出发布用的 FCP字幕.dmg(~14MB):只内置 0.6MB 的 VAD 模型,SenseVoice 由
+# 用户首次启动后在「模型管理」页下载。GitHub Release 只发这一个。
+# --with-models: 额外内置 SenseVoice(~240MB),产出离线安装用的 FCP字幕-含模型.dmg。
+WITH_MODELS=0
 DMG_NAME="$APP_NAME"
-if [[ "${1:-}" == "--no-models" ]]; then
-    WITH_MODELS=0
-    DMG_NAME="$APP_NAME-精简版"
-fi
+case "${1:-}" in
+    --with-models) WITH_MODELS=1; DMG_NAME="$APP_NAME-含模型" ;;
+    ""|--no-models) ;;  # --no-models was the old spelling of the default
+    *) echo "未知参数: $1(可用: --with-models)" >&2; exit 1 ;;
+esac
 
 echo "==> swift build (release)"
 cd "$GUI_DIR"
@@ -100,14 +103,18 @@ if [[ -f "$ICON_PNG" ]]; then
     rm -rf "$ICONSET"
 fi
 
+# The VAD model is tiny, so it always ships: first launch then needs only the
+# SenseVoice download (hf-mirror by default) instead of a second one from GitHub.
+echo "==> 内置 VAD 模型 (0.6MB)"
+mkdir -p "$APP/Contents/Resources/models"
+cp "$PROJECT_DIR/models/silero_vad.onnx" "$APP/Contents/Resources/models/"
 if [[ $WITH_MODELS -eq 1 ]]; then
-    echo "==> 拷贝模型 (models/)"
+    echo "==> 内置 SenseVoice 模型 (--with-models)"
     mkdir -p "$APP/Contents/Resources/models/sense-voice"
     cp "$PROJECT_DIR/models/sense-voice/model.int8.onnx" "$APP/Contents/Resources/models/sense-voice/"
     cp "$PROJECT_DIR/models/sense-voice/tokens.txt" "$APP/Contents/Resources/models/sense-voice/"
-    cp "$PROJECT_DIR/models/silero_vad.onnx" "$APP/Contents/Resources/models/"
 else
-    echo "==> 精简版:跳过模型打包"
+    echo "==> SenseVoice 不打包,用户在「模型管理」页下载"
 fi
 
 echo "==> 拷贝 dylib(只拷实际链接到的,不再整目录拷贝)"

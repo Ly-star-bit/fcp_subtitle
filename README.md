@@ -11,7 +11,7 @@
 | | GUI 应用（`gui/`） | Python CLI + Finder 右键 |
 |---|---|---|
 | 适合人群 | 剪辑师日常使用 | 喜欢命令行 / 需要脚本化 |
-| 安装 | 一个 dmg，拖进应用程序即用 | `uv sync` + 下载模型 |
+| 安装 | 一个 dmg，拖进应用程序；首次启动应用内下载模型 | `uv sync` + 下载模型 |
 | 功能 | 批量拖拽、逐句试听校对、AI 查错别字、一键送进 FCP、时间轴预览、智能断句、6 种格式导出 | 单文件转换，参数可控 |
 | 依赖 | 无（自包含） | ffmpeg、Python 3.12+ |
 
@@ -28,7 +28,7 @@
 - **纠错词典**：把反复出错的词存成规则，下次识别自动替换
 - 合并、拆分、删除、全部替换、应用 AI 校对都能 ⌘Z 撤销；手改的字幕自动保存
 - 应用内模型下载，支持代理与国内镜像
-- 精简版 dmg（约 14MB，不含模型，首次启动时在「模型管理」里下载）与完整版 dmg（约 180MB，含模型开箱即用）
+- 安装包约 14MB，不含识别模型：首次启动后在「模型管理」页下载 SenseVoice（约 228MB，默认走国内镜像 hf-mirror.com，也可设代理）
 
 > **首次打开被拦？** 应用是 ad-hoc 签名、未经公证。macOS 15 及以上：先双击一次，再到「系统设置 → 隐私与安全性」底部点「仍要打开」（右键 →「打开」从 macOS 15 起已无效）；macOS 14：右键 →「打开」。
 
@@ -38,8 +38,8 @@
 cd gui
 ./scripts/fetch_deps.sh        # 下载 sherpa-onnx + 微软官方 onnxruntime 到 gui/Vendor/(校验 SHA-256)
 ./scripts/test.sh              # 跑单元测试(只装了 Command Line Tools 也能跑)
-./scripts/package_app.sh       # 构建并打包 → gui/dist/FCP字幕.dmg（含模型）
-./scripts/package_app.sh --no-models   # 精简版 → gui/dist/FCP字幕-精简版.dmg
+./scripts/package_app.sh       # 构建并打包 → gui/dist/FCP字幕.dmg（发布用，不含识别模型）
+./scripts/package_app.sh --with-models # 内置识别模型的离线安装包 → gui/dist/FCP字幕-含模型.dmg（不发布）
 ```
 
 > `fetch_deps.sh` 默认走代理下载，可用 `FCP_SUBTITLE_PROXY` 环境变量覆盖（设为空串则直连）。onnxruntime 用微软官方包而不是 sherpa-onnx 自带的那份：后者在 Apple Silicon 上用不到 int8 点积指令，识别慢约 2.6 倍。`package_app.sh` 可用 `FCP_SUBTITLE_DIST` 指定输出目录。

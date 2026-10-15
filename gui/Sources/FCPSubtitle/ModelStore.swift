@@ -76,8 +76,11 @@ final class ModelStore: ObservableObject {
     @Published var states: [String: ItemState] = [:]
     @Published var downloadInfo: [String: DownloadInfo] = [:]
 
-    @AppStorage("useProxy") var useProxy = true
-    @AppStorage("proxyURL") var proxyURL = "http://192.168.20.87:7899"
+    // Off by default: released builds ship without the recognition model, so
+    // a fresh install has to download it with no setup. URLSession still
+    // follows the system proxy settings.
+    @AppStorage("useProxy") var useProxy = false
+    @AppStorage("proxyURL") var proxyURL = ""
     @AppStorage("useHFMirror") var useHFMirror = true
 
     private var activeTasks: [String: FileDownloader] = [:]
