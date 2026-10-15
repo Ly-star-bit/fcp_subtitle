@@ -4,7 +4,7 @@
 
 - **全程本地离线**：SenseVoice 识别 + Silero VAD 分段，经 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 推理，素材不上传任何服务器
 - **多语言**：中文、英语、粤语、日语、韩语（SenseVoice 支持范围）
-- **帧精确**：时间码按分数帧生成，支持 23.976 / 24 / 25 / 29.97 / 30 fps
+- **帧精确**：时间码按分数帧生成，支持 23.976 / 24 / 25 / 29.97 / 30 / 50 / 59.94 / 60 fps；视频素材自动跟随自身的尺寸和帧率（含竖屏）
 
 提供两种形态，按需选用：
 
@@ -26,19 +26,23 @@
 - **一键发送到 FCP**：直接唤起 Final Cut Pro 的导入对话框，不用先存文件再手动找
 - 导出 6 种格式：FCPXML（可编辑 Basic Title）/ SRT / WebVTT / ASS / LRC / 纯文本
 - **纠错词典**：把反复出错的词存成规则，下次识别自动替换
+- 合并、拆分、删除、全部替换、应用 AI 校对都能 ⌘Z 撤销；手改的字幕自动保存
 - 应用内模型下载，支持代理与国内镜像
-- 精简版 dmg（约 50MB，不含模型，首次启动时在「模型管理」里下载）与完整版 dmg（约 178MB，含模型开箱即用）
+- 精简版 dmg（约 14MB，不含模型，首次启动时在「模型管理」里下载）与完整版 dmg（约 180MB，含模型开箱即用）
+
+> **首次打开被拦？** 应用是 ad-hoc 签名、未经公证。macOS 15 及以上：先双击一次，再到「系统设置 → 隐私与安全性」底部点「仍要打开」（右键 →「打开」从 macOS 15 起已无效）；macOS 14：右键 →「打开」。
 
 ### 从源码构建
 
 ```bash
 cd gui
-./scripts/fetch_deps.sh        # 下载 sherpa-onnx 预编译库到 gui/Vendor/
+./scripts/fetch_deps.sh        # 下载 sherpa-onnx + 微软官方 onnxruntime 到 gui/Vendor/(校验 SHA-256)
+./scripts/test.sh              # 跑单元测试(只装了 Command Line Tools 也能跑)
 ./scripts/package_app.sh       # 构建并打包 → gui/dist/FCP字幕.dmg（含模型）
 ./scripts/package_app.sh --no-models   # 精简版 → gui/dist/FCP字幕-精简版.dmg
 ```
 
-> `fetch_deps.sh` 默认走代理下载，可用 `FCP_SUBTITLE_PROXY` 环境变量覆盖（设为空串则直连）。
+> `fetch_deps.sh` 默认走代理下载，可用 `FCP_SUBTITLE_PROXY` 环境变量覆盖（设为空串则直连）。onnxruntime 用微软官方包而不是 sherpa-onnx 自带的那份：后者在 Apple Silicon 上用不到 int8 点积指令，识别慢约 2.6 倍。`package_app.sh` 可用 `FCP_SUBTITLE_DIST` 指定输出目录。
 
 ### AI 校对错别字
 
@@ -86,7 +90,7 @@ uv run fcp-subtitle 素材.mp4 --font "苹方-简" --font-size 72 -o 字幕.fcpx
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `-o, --output` | 输入同目录同名 | 输出 `.fcpxml` 路径 |
-| `--fps` | `25` | 时间线帧率：`23.976` / `24` / `25` / `29.97` / `30` |
+| `--fps` | `25` | 时间线帧率：`23.976` / `24` / `25` / `29.97` / `30` / `50` / `59.94` / `60` |
 | `--font` | `PingFang SC` | 字幕字体 |
 | `--font-size` | `60` | 字号 |
 | `--width` / `--height` | `1920` / `1080` | 时间线分辨率 |
@@ -118,7 +122,8 @@ gui/                            Swift GUI 应用
   Sources/FCPSubtitleCore/      核心库:解码 / 识别 / 断句 / FCPXML & SRT 生成
   Sources/FCPSubtitle/          SwiftUI 界面:批量队列 / 校对 / 预览 / 模型管理
   Sources/fcpsub-cli/           调试用命令行入口
-  scripts/                      fetch_deps.sh(拉推理库) / package_app.sh(打 dmg)
+  Tests/                        核心库单元测试(swift-testing)
+  scripts/                      fetch_deps.sh(拉推理库) / test.sh(跑测试) / package_app.sh(打 dmg)
 models/                         模型文件(gitignore,不入库)
 ```
 

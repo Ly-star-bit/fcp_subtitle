@@ -23,19 +23,21 @@ let package = Package(
         .systemLibrary(name: "SherpaOnnxC", path: "Sources/SherpaOnnxC"),
         .target(
             name: "FCPSubtitleCore",
-            dependencies: ["SherpaOnnxC"],
-            swiftSettings: [.unsafeFlags(["-I", "Vendor/sherpa-onnx/include"])]
+            dependencies: ["SherpaOnnxC"]
         ),
         .executableTarget(
             name: "FCPSubtitle",
             dependencies: ["FCPSubtitleCore"],
-            swiftSettings: [.unsafeFlags(["-I", "Vendor/sherpa-onnx/include"])],
             linkerSettings: sherpaLinkerSettings
         ),
         .executableTarget(
             name: "fcpsub-cli",
             dependencies: ["FCPSubtitleCore"],
-            swiftSettings: [.unsafeFlags(["-I", "Vendor/sherpa-onnx/include"])],
+            linkerSettings: sherpaLinkerSettings
+        ),
+        .testTarget(
+            name: "FCPSubtitleCoreTests",
+            dependencies: ["FCPSubtitleCore"],
             linkerSettings: sherpaLinkerSettings
         ),
     ]
