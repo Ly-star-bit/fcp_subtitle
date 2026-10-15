@@ -6,6 +6,7 @@ struct ContentView: View {
     @ObservedObject private var state = AppState.shared
     @StateObject private var previewPlayer = PreviewPlayer()
     @EnvironmentObject private var router: TabRouter
+    @Environment(\.undoManager) private var undoManager
     @State private var dropTargeted = false
     @State private var findText = ""
     @State private var replaceText = ""
@@ -29,11 +30,13 @@ struct ContentView: View {
         .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
             handleDrop(providers)
         }
+        // Sheets get the main window's undo manager so their edits stay
+        // undoable after the sheet closes.
         .sheet(isPresented: $showDictionary) {
-            DictionarySheet()
+            DictionarySheet(undoManager: undoManager)
         }
         .sheet(isPresented: $showProofread) {
-            ProofreadSheet()
+            ProofreadSheet(undoManager: undoManager)
         }
         .background(hiddenShortcuts)
     }
@@ -307,7 +310,7 @@ struct ContentView: View {
                     + " · 时间线 \(timeline.label)\(timeline.followsSource ? "(跟随视频)" : "")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("⌘↑/⌘↓ 选句 · ⌘↩ 试听 · 右键行可合并/拆分")
+                Text("⌘↑/⌘↓ 选句 · ⌘↩ 试听 · 右键行可合并/拆分 · ⌘Z 撤销")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -323,6 +326,7 @@ struct ContentView: View {
             set: { newValue in
                 if let index = state.files.firstIndex(where: { $0.id == fileID }) {
                     state.files[index].segments = newValue
+                    state.scheduleSave()
                 }
             }
         )
@@ -368,17 +372,20 @@ struct ContentView: View {
         }
         .contextMenu {
             Button("与上一句合并") {
-                state.mergeWithPrevious(fileID: file.id, segmentID: seg.wrappedValue.id)
+                state.mergeWithPrevious(
+                    fileID: file.id, segmentID: seg.wrappedValue.id, undoManager: undoManager)
             }
             .disabled(index == 0)
             Button("按标点拆分") {
-                state.splitAtPunctuation(fileID: file.id, segmentID: seg.wrappedValue.id)
+                state.splitAtPunctuation(
+                    fileID: file.id, segmentID: seg.wrappedValue.id, undoManager: undoManager)
             }
             Divider()
             timeNudgeMenu(file: file, seg: seg.wrappedValue)
             Divider()
             Button("删除这一句", role: .destructive) {
-                state.deleteSegment(fileID: file.id, segmentID: seg.wrappedValue.id)
+                state.deleteSegment(
+                    fileID: file.id, segmentID: seg.wrappedValue.id, undoManager: undoManager)
             }
         }
     }
@@ -386,19 +393,17 @@ struct ContentView: View {
     @ViewBuilder
     private func timeNudgeMenu(file: QueueFile, seg: SubtitleSegment) -> some View {
         Menu("调整时间") {
-            Button("提前出现 0.1s") {
-                state.nudge(fileID: file.id, segmentID: seg.id, startDelta: -0.1, durationDelta: 0.1)
-            }
-            Button("延后出现 0.1s") {
-                state.nudge(fileID: file.id, segmentID: seg.id, startDelta: 0.1, durationDelta: -0.1)
-            }
-            Button("延长 0.2s") {
-                state.nudge(fileID: file.id, segmentID: seg.id, startDelta: 0, durationDelta: 0.2)
-            }
-            Button("缩短 0.2s") {
-                state.nudge(fileID: file.id, segmentID: seg.id, startDelta: 0, durationDelta: -0.2)
-            }
+            Button("提前出现 0.1s") { nudge(file, seg, start: -0.1, duration: 0.1) }
+            Button("延后出现 0.1s") { nudge(file, seg, start: 0.1, duration: -0.1) }
+            Button("延长 0.2s") { nudge(file, seg, start: 0, duration: 0.2) }
+            Button("缩短 0.2s") { nudge(file, seg, start: 0, duration: -0.2) }
         }
+    }
+
+    private func nudge(_ file: QueueFile, _ seg: SubtitleSegment, start: Double, duration: Double) {
+        state.nudge(
+            fileID: file.id, segmentID: seg.id, startDelta: start, durationDelta: duration,
+            undoManager: undoManager)
     }
 
     private var findReplaceBar: some View {
@@ -413,7 +418,7 @@ struct ContentView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 150)
             Button("全部替换") {
-                let n = state.replaceAll(find: findText, replace: replaceText)
+                let n = state.replaceAll(find: findText, replace: replaceText, undoManager: undoManager)
                 replaceResult = "已替换 \(n) 处"
             }
             .disabled(findText.isEmpty)
@@ -569,11 +574,16 @@ struct ContentView: View {
 // MARK: - Dictionary management sheet
 
 struct DictionarySheet: View {
+    let undoManager: UndoManager?
     @ObservedObject private var state = AppState.shared
     @Environment(\.dismiss) private var dismiss
     @State private var newFind = ""
     @State private var newReplace = ""
     @State private var applyResult: String?
+
+    init(undoManager: UndoManager?) {
+        self.undoManager = undoManager
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -628,7 +638,7 @@ struct DictionarySheet: View {
 
             HStack {
                 Button("立即应用到当前文件") {
-                    let n = state.applyDictionaryToSelected()
+                    let n = state.applyDictionaryToSelected(undoManager: undoManager)
                     applyResult = "已替换 \(n) 处"
                 }
                 .disabled(state.dictionary.isEmpty || state.selectedFile?.status != .done)

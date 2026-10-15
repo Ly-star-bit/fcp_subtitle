@@ -7,11 +7,18 @@ final class TabRouter: ObservableObject {
     @Published var selection = 0
 }
 
-/// Receives files dragged onto the Dock icon / opened via "打开方式".
+/// Receives files dragged onto the Dock icon / opened via "打开方式", and
+/// flushes unsaved edits on quit.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         Task { @MainActor in
             AppState.shared.enqueue(urls: urls)
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            AppState.shared.saveSession()
         }
     }
 }

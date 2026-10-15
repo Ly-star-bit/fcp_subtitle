@@ -5,10 +5,15 @@ import SwiftUI
 /// typos, then lets the user pick which suggestions to apply. Nothing is
 /// changed until 应用 is pressed.
 struct ProofreadSheet: View {
+    let undoManager: UndoManager?
     @ObservedObject private var state = AppState.shared
     @Environment(\.dismiss) private var dismiss
     @State private var showSettings = false
     @State private var resultNote: String?
+
+    init(undoManager: UndoManager?) {
+        self.undoManager = undoManager
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -246,7 +251,7 @@ struct ProofreadSheet: View {
             case .finished(let count) where count > 0:
                 Button("重新校对") { state.startProofread() }
                 Button("应用选中的 \(state.acceptedCorrections.count) 处") {
-                    let result = state.applyAcceptedCorrections()
+                    let result = state.applyAcceptedCorrections(undoManager: undoManager)
                     resultNote =
                         result.skipped > 0
                         ? "已修改 \(result.applied) 句,\(result.skipped) 句因已被手动编辑而跳过"

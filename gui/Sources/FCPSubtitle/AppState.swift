@@ -129,6 +129,7 @@ final class AppState: ObservableObject {
     private var processTask: Task<Void, Never>?
     private var cancelFlag = CancelFlag()
     private var activityToken: NSObjectProtocol?
+    private var pendingSave: Task<Void, Never>?
 
     private static let sessionURL = ModelStore.downloadDir
         .deletingLastPathComponent()
@@ -383,8 +384,9 @@ final class AppState: ObservableObject {
     }
 
     /// Apply all dictionary rules to the selected file now; returns replacement count.
-    func applyDictionaryToSelected() -> Int {
+    func applyDictionaryToSelected(undoManager: UndoManager?) -> Int {
         guard let index = selectedIndex else { return 0 }
+        let previous = files[index].segments
         var count = 0
         for i in files[index].segments.indices {
             for rule in dictionary where !rule.find.isEmpty {
@@ -396,7 +398,11 @@ final class AppState: ObservableObject {
                 }
             }
         }
-        if count > 0 { saveSession() }
+        if count > 0 {
+            commitEdit(
+                fileID: files[index].id, previous: previous, actionName: "应用纠错词典",
+                undoManager: undoManager)
+        }
         return count
     }
 
@@ -417,49 +423,76 @@ final class AppState: ObservableObject {
 
     // MARK: - Segment editing
 
-    func mergeWithPrevious(fileID: UUID, segmentID: UUID) {
+    /// Saves after an edit and makes it undoable with ⌘Z. Undo swaps the
+    /// file's whole segment list back and registers the inverse, so ⌘⇧Z
+    /// redoes it. Text typed into the list is undone by the text field itself.
+    private func commitEdit(
+        fileID: UUID, previous: [SubtitleSegment], actionName: String, undoManager: UndoManager?
+    ) {
+        saveSession()
+        guard let undoManager else { return }
+        // Weak: the undo manager owns this closure.
+        undoManager.registerUndo(withTarget: self) { [weak undoManager] state in
+            guard let fi = state.files.firstIndex(where: { $0.id == fileID }) else { return }
+            let current = state.files[fi].segments
+            state.files[fi].segments = previous
+            state.commitEdit(
+                fileID: fileID, previous: current, actionName: actionName, undoManager: undoManager)
+        }
+        undoManager.setActionName(actionName)
+    }
+
+    func mergeWithPrevious(fileID: UUID, segmentID: UUID, undoManager: UndoManager?) {
         guard let fi = files.firstIndex(where: { $0.id == fileID }),
             let si = files[fi].segments.firstIndex(where: { $0.id == segmentID }),
             si > 0
         else { return }
+        let before = files[fi].segments
         let current = files[fi].segments[si]
         var previous = files[fi].segments[si - 1]
         previous.duration = current.end - previous.start
         previous.text += current.text
         files[fi].segments[si - 1] = previous
         files[fi].segments.remove(at: si)
-        saveSession()
+        commitEdit(fileID: fileID, previous: before, actionName: "合并字幕", undoManager: undoManager)
     }
 
-    func splitAtPunctuation(fileID: UUID, segmentID: UUID) {
+    func splitAtPunctuation(fileID: UUID, segmentID: UUID, undoManager: UndoManager?) {
         guard let fi = files.firstIndex(where: { $0.id == fileID }),
             let si = files[fi].segments.firstIndex(where: { $0.id == segmentID })
         else { return }
         let pieces = SegmentSplitter.split([files[fi].segments[si]], maxChars: 1)
         guard pieces.count > 1 else { return }
+        let before = files[fi].segments
         files[fi].segments.replaceSubrange(si...si, with: pieces)
-        saveSession()
+        commitEdit(fileID: fileID, previous: before, actionName: "拆分字幕", undoManager: undoManager)
     }
 
-    func deleteSegment(fileID: UUID, segmentID: UUID) {
+    func deleteSegment(fileID: UUID, segmentID: UUID, undoManager: UndoManager?) {
         guard let fi = files.firstIndex(where: { $0.id == fileID }) else { return }
+        let before = files[fi].segments
         files[fi].segments.removeAll { $0.id == segmentID }
-        saveSession()
+        commitEdit(fileID: fileID, previous: before, actionName: "删除字幕", undoManager: undoManager)
     }
 
-    func nudge(fileID: UUID, segmentID: UUID, startDelta: Double, durationDelta: Double) {
+    func nudge(
+        fileID: UUID, segmentID: UUID, startDelta: Double, durationDelta: Double,
+        undoManager: UndoManager?
+    ) {
         guard let fi = files.firstIndex(where: { $0.id == fileID }),
             let si = files[fi].segments.firstIndex(where: { $0.id == segmentID })
         else { return }
+        let before = files[fi].segments
         var seg = files[fi].segments[si]
         seg.start = max(0, seg.start + startDelta)
         seg.duration = max(0.1, seg.duration + durationDelta)
         files[fi].segments[si] = seg
-        saveSession()
+        commitEdit(fileID: fileID, previous: before, actionName: "调整时间", undoManager: undoManager)
     }
 
-    func replaceAll(find: String, replace: String) -> Int {
+    func replaceAll(find: String, replace: String, undoManager: UndoManager?) -> Int {
         guard let index = selectedIndex, !find.isEmpty else { return 0 }
+        let previous = files[index].segments
         var count = 0
         for i in files[index].segments.indices {
             let before = files[index].segments[i].text
@@ -469,7 +502,11 @@ final class AppState: ObservableObject {
                 files[index].segments[i].text = after
             }
         }
-        if count > 0 { saveSession() }
+        if count > 0 {
+            commitEdit(
+                fileID: files[index].id, previous: previous, actionName: "全部替换",
+                undoManager: undoManager)
+        }
         return count
     }
 
@@ -482,7 +519,20 @@ final class AppState: ObservableObject {
         let videoFormat: VideoFormat?
     }
 
+    /// Text typed into the list arrives one keystroke at a time; coalesce it
+    /// into a single write a second after typing stops. Quitting flushes it.
+    func scheduleSave() {
+        pendingSave?.cancel()
+        pendingSave = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.saveSession()
+        }
+    }
+
     func saveSession() {
+        pendingSave?.cancel()
+        pendingSave = nil
         let snapshot = files
             .filter { $0.status == .done && !$0.segments.isEmpty }
             .map {
@@ -730,11 +780,12 @@ final class AppState: ObservableObject {
     /// are skipped rather than silently overwritten; the returned pair is
     /// (applied, skipped).
     @discardableResult
-    func applyAcceptedCorrections() -> (applied: Int, skipped: Int) {
+    func applyAcceptedCorrections(undoManager: UndoManager?) -> (applied: Int, skipped: Int) {
         guard let fileID = proofreadFileID,
             let fi = files.firstIndex(where: { $0.id == fileID })
         else { return (0, 0) }
 
+        let previous = files[fi].segments
         var applied = 0
         var skipped = 0
         for correction in corrections where acceptedCorrections.contains(correction.id) {
@@ -749,7 +800,11 @@ final class AppState: ObservableObject {
             files[fi].segments[si].text = correction.suggested
             applied += 1
         }
-        if applied > 0 { saveSession() }
+        if applied > 0 {
+            commitEdit(
+                fileID: fileID, previous: previous, actionName: "应用 AI 校对",
+                undoManager: undoManager)
+        }
         corrections.removeAll { acceptedCorrections.contains($0.id) }
         acceptedCorrections = []
         proofread = .finished(corrections.count)
